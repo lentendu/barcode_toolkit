@@ -8,7 +8,7 @@ This toolkit is for unix based system only (e.g. Linux, MAC or [WSL](https://lea
 In the terminal, type the following command in the desired installation directory:
 ```
 git clone https://github.com/lentendu/barcode_toolkit.git
-``
+```
 
 You can add the bin directory into your PATH variable to access the executables from everywere on your system, using, for example, the following line:
 ```
