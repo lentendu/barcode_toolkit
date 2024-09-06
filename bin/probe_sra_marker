@@ -1,0 +1,549 @@
+#!/bin/bash
+
+# author: Guillaume Lentendu (guillaume.lentendu@unine.ch)
+
+## compulsory input: 
+#	1/ probe
+#	2/ list of library from a single bioproject as generated when querying a bioproject accession over ena with "result=read_run&download=text" -> 51 tab-separated columns
+
+## compulsory dependencies:
+# aspera_connect/3.9.7 vsearch/2.13.6 python3-eco/3.5 pandaseq/2.11 parallel/20190822 swarm/3.0.0 sff2fastq/0.9.2
+
+STIME=`date +%s`
+(set -o posix; set > /tmp/probe_sra.$STIME.set)
+
+# Usage info
+show_help() {
+cat << EOF
+
+NAME
+	probe_sra_marker - extract reads matching probes from SRA marker gene run files
+	
+SYNOPSIS
+	Usage: ${0##*/} [-d] [-f forward_candidate_primers] [-l label] [-r reverse_candidate_primers] [-s size_filter] [-t thread] -p DNA_probe ENA_read_run_metadata
+
+DESCRIPTION
+	-h	display this help and exit
+	
+	-d	debug - print all environmental parameters set and do not delete execution directory
+	
+	-f forward_candidate_primers
+		fasta file containing candidate forward PCR primers used to produce the libraries
+	
+	-l label
+		label prefix to annotate matched read files; default: target
+		
+	-m mismatch 
+		maximum number of mismatch(es) allowed between the probe and a matching read; default: 0
+	
+	-o overlap_length_percent
+		minimum percent of the length of the overlap between the probe and a matching read; default: 100
+	
+	-p DNA_probe
+		probe to search for in the raw reads; IUPAC code accepted; compulsory option
+	
+	-r reverse_candidate_primers
+		fasta file containing candidate reverse PCR primers used to produce the libraries
+	
+	-s size_filter
+		minimum abundance to keep an OTU; default: 4
+
+	-t thread
+		number of thread available for parallel computing; default: 1
+
+AUTHOR
+	Guillaume Lentendu
+
+COPYRIGHT
+	Copyright (C) 2020 Guillaume Lentendu
+
+EOF
+}
+
+error_help(){
+	echo -e "\n#Error: $1 \n"
+	if [ -z $DEBUG ]
+	then
+		rm /tmp/probe_sra.$STIME.set
+		cd $INDIR
+		if [ ! -z $PROJ ] ; then rm -rf $PROJ ; fi
+		show_help | fmt -s -w $(tput cols)
+	else
+		comm -23 <(set -o posix; set | sort) <(sort /tmp/probe_sra.$STIME.set) | tr "=" "\t" | grep -v "^[a-z]\|^BASH_" | grep -P -v "^PWD\t" | sed "s/'//g" > $PROJ.env
+		rm /tmp/probe_sra.$STIME.set
+	fi
+	exit 1
+} >&2
+
+# Option's default value
+LABEL=target
+MISM=0
+OVERL=100
+SIZEF=4
+NCPUS=1
+PALG=simple_bayesian
+INDIR=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+export INDIR STIME
+
+# get options
+while getopts ":hdf:l:m:o:p:r:s:t:" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			exit 0;;
+		d)	DEBUG=yes && export DEBUG;;
+		f)	[[ -f ${OPTARG} ]] || error_help " file ${OPTARG} not found"
+			FORWARD=$(readlink -f ${OPTARG});;
+		l)	LABEL=${OPTARG};;
+		m)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			MISM=${OPTARG};;
+		o)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			OVERL=${OPTARG};;
+		p)	PROBE=${OPTARG};;
+		r)	[[ -f ${OPTARG} ]] || error_help " file ${OPTARG} not found"
+			REVERSE=$(readlink -f ${OPTARG});;
+		s)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			SIZEF=${OPTARG};;
+		t)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			NCPUS=${OPTARG};;
+		\?)	error_help "# Invalid option: -${OPTARG}"
+			;;
+		:)	error_help "# Option -${OPTARG} requires an argument."
+			;;
+	esac
+done
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
+if [ -z "$1" ]
+then 
+	error_help "the input file is missing."
+else
+	INPUT=`readlink -f $1` ; shift
+fi
+if [ -z $PROBE ]
+then 
+	error_help "the probe sequence is missing."
+fi
+
+# 1. check input
+NBCOL=$(awk 'BEGIN{FS="\t"}NR==1{print NF}' $INPUT)
+if [ ! $NBCOL -eq 51 ]
+then
+	error_help "the input file is not in the expected format"
+fi
+# create project directory
+HASH=$(cksum $INPUT | cut -d " " -f 1)
+BIOPROJ=$(cut -f 1 $INPUT | grep "^PRJ" | sort | uniq -c | sort -k 1,1nr | awk 'NR==1{print $2}')
+if [ -z $BIOPROJ ]
+then
+	error_help "there is no bioproject accession in the input file"
+fi
+PROJ=$BIOPROJ.$HASH
+if [ -d $PROJ ]
+then
+	error_help "the directory $PROJ already exist"
+fi
+export PROJ
+mkdir $PROJ
+# remove header if any
+awk 'BEGIN{FS="\t"}{if(NR==1){if($1!="study_accession"){print}} else print}' $INPUT > $PROJ/$PROJ.libraries.tsv
+if [ ! -s $PROJ/$PROJ.libraries.tsv ]
+then
+	error_help "input file does not contain any library"
+fi
+# control bioproject
+NBLIB=$(sed -n '$=' $PROJ/$PROJ.libraries.tsv)
+if [ ! $(cut -f 1 $PROJ/$PROJ.libraries.tsv | grep -c $BIOPROJ) -eq $NBLIB ]
+then
+	error_help "there is more than one bioproject accession in the input file"
+fi
+echo -e "probe_sra_marker for project $PROJ using probe $PROBE and input library file $INPUT \n"
+
+# 2. download
+cd $PROJ
+PLATF=$(cut -f 10 $PROJ.libraries.tsv | sort -u)
+#if [ $PLATF != "ILLUMINA" ]
+#then
+	#error_help "$PLATF is of unsupported data format"
+#fi
+LAYOUT=($(cut -f 14 $PROJ.libraries.tsv | sort -u))
+if [ ${#LAYOUT[@]} -gt 1 ]
+then
+	echo "Multiple layouts are not supported (library files contains the following layouts: ${LAYOUT[@]})"
+	error_help "Split input by layout type and restart"
+fi
+# check files from SRA (if three libraries per run (i.e. paired then R1 and R2), only keep R1 (2nd) and R2 (3rd))
+RUNACC=($(cut -f 6 $PROJ.libraries.tsv))
+RUNASP=($(cut -f 31,36 $PROJ.libraries.tsv | awk 'BEGIN{FS="\t"}{if($1==""){print $2} else {l=split($1,a,";");if(l==3){print a[2]";"a[3]} else {print $1}}}'))
+RUNMD5=($(cut -f 29,34 $PROJ.libraries.tsv | awk 'BEGIN{FS="\t"}{if($1==""){print $2} else {l=split($1,a,";");if(l==3){print a[2]";"a[3]} else {print $1}}}'))
+if [ -z $RUNASP ]
+then
+	error_help "no files to download in fastq_aspera or submitted_aspera"
+fi
+# disable paired layout if only one file provided (i.e. already pair-end assembled)
+if  [ $LAYOUT == "PAIRED" ] && [ $(echo ${RUNASP[0]//;/ } | wc -w) -lt 2 ]
+then
+	LAYOUT=SINGLE
+fi
+
+# aspera
+ASPERA_DIR=$(dirname $(which ascp) | sed 's@/bin$@@')
+#parallel -j $NCPUS "ascp -T -l 300m -m 1m -P33001 -C {#}:{#} -i $ASPERA_DIR/etc/asperaweb_id_dsa.openssh era-fasp@{} ./" ::: ${RUNASP[@]//;/ } # avoid parallel download or use ascp parallel implement
+echo ${RUNASP[@]//;/ } | tr " " "\n" | sed 's/.*://' > to_download
+ascp -QTq -l 300m -P33001 -i $ASPERA_DIR/etc/asperaweb_id_dsa.openssh --mode=recv --user=era-fasp --host=fasp.sra.ebi.ac.uk --file-list=to_download ./
+# check missing and retry download until everything is fine or exit
+MISSING=$(sed -r 's@(.*/)(.*)@\2\t\1\2@' to_download | sort -k 1,1 | join -t $'\t' -v 1 - <(ls) | cut -f 2)
+LASTMISS=$(echo ${RUNASP[@]//;/ } | wc -w)
+if [ ! -z "$MISSING" ]
+then
+	while [ ! -z "$MISSING" ]
+	do
+		if [ $(echo "$MISSING" | wc -w) -eq $LASTMISS ]
+		then
+			DOWNLOAD="incomplet"
+			break
+		fi
+		LASTMISS=$(echo "$MISSING" | wc -w)
+		sleep 60
+		#parallel -j $NCPUS "ascp -QT -l 300m -P33001 -i $ASPERA_DIR/etc/asperaweb_id_dsa.openssh era-fasp@{} ./" ::: $MISSING
+		echo "$MISSING" | tr " " "\n" > to download
+		ascp -QTq -l 300m -P33001 -i $ASPERA_DIR/etc/asperaweb_id_dsa.openssh --mode=recv --user=era-fasp --host=fasp.sra.ebi.ac.uk --file-list=to_download ./
+		MISSING=$(sed -r 's@(.*/)(.*)@\2\t\1\2@' to_download | sort -k 1,1 | join -t $'\t' -v 1 - <(ls) | cut -f 2)
+	done
+fi
+if [ ! -z "$DOWNLOAD" ]
+then
+	>&2 echo "Incomplete download:"
+	>&2 echo $MISSING | tr " " "\n"
+	error_help "Not all libraries could be downloaded"
+fi 
+
+# checksum
+parallel -j $NCPUS "md5sum -c <(echo {1} {2} | sed 's@ [^ ]*/@  @')" ::: ${RUNMD5[@]//;/ } :::+ ${RUNASP[@]//;/ } > $PROJ.run.md5
+if [ ! $? -eq 0 ]
+then
+	>&2 echo "#Error with MD5 checksum of run files:"
+	>&2 grep "FAILED" $PROJ.run.md5 | fmt -s -w $(tput cols)
+	exit 1
+else
+	rm $PROJ.run.md5
+fi
+
+# 3. cutadapt
+PROBE_RC=$(echo -e ">cand\n$PROBE" | vsearch --quiet --fastx_revcomp - --fastaout - | tail -1)
+ERROR=$(awk -v M=$MISM -v C=${#PROBE} 'BEGIN{printf "%.2f",M/C+0.005}')
+OLENGTH=$(awk -v V=$OVERL -v C=${#PROBE} 'BEGIN{printf "%d",C*V/100}')
+# convert sff to fastq
+if [[ $PLATF == "LS454" ]] && [[ ${RUNASP[@]##*.} == *"sff"* ]]
+then
+	parallel -j $NCPUS "sff2fastq {} | gzip > {.}.fastq.gz" ::: $(echo ${RUNASP[@]##*/} | tr " " "\n" | grep "sff$")
+	rm *sff
+	RUNASP=(${RUNASP[@]//sff/fastq.gz})
+fi
+# get reads with probe match
+for i in $(seq 0 $((NBLIB - 1)))
+do
+	if [ $LAYOUT == "SINGLE" ]
+	then
+		cutadapt -j $NCPUS -e $ERROR -O $OLENGTH -g $PROBE -g $PROBE_RC --action=none --discard-untrimmed -o $LABEL.${RUNACC[$i]}.fastq.gz ${RUNASP[$i]##*/} > log.cutadapt.${RUNACC[$i]}.tmp
+	else
+		LIBS=($(echo ${RUNASP[$i]//;/ } | sed 's@[^ ]*/@@g'))
+		cutadapt -j $NCPUS -e $ERROR -O $OLENGTH -g $PROBE -G $PROBE -g $PROBE_RC -G $PROBE_RC --action=none --pair-filter=both --discard-untrimmed -o $LABEL.${RUNACC[$i]}.R1.fastq.gz -p $LABEL.${RUNACC[$i]}.R2.fastq.gz ${LIBS[0]} ${LIBS[1]} > log.cutadapt.${RUNACC[$i]}.tmp
+	fi
+done
+# check and clean
+TEST=$(ls -S $LABEL.*.fastq.gz | head -1)
+if [[ $(gunzip -ck $TEST | head -c1 | wc -c) == "0" ]]
+then
+	echo "The probe was not found in any library."
+	tar czf ../log.$PROJ.tar.gz log.*.txt
+	cd ..
+	rm -r $PROJ /tmp/probe_sra.$STIME.set
+	ETIME=`date +%s`
+	echo "Execution time: $(date -d@$((ETIME - STIME)) -u +%H:%M:%S)"
+	exit 0
+fi
+rm $(echo ${RUNASP[@]//;/ } | sed 's@[^ ]*/@@g')
+# get rid of run files without probe match
+if [ $LAYOUT == "SINGLE" ]
+then
+	notempty () { acc=$1 ; pos=$2 ; if [ $(gunzip -ck $LABEL.$acc.fastq.gz | head -c1 | wc -c) -gt 0 ]; then echo $((pos - 1)) ; else rm $LABEL.$acc.fastq.gz log.cutadapt.$acc.tmp ; fi ; }
+else
+	notempty () { acc=$1 ; pos=$2 ; if [ $(gunzip -ck $LABEL.$acc.R1.fastq.gz | head -c1 | wc -c) -gt 0 ]; then echo $((pos - 1)) ; else rm $LABEL.$acc.R[12].fastq.gz log.cutadapt.$acc.tmp ; fi ; }
+fi
+export -f notempty
+export LABEL
+INDEX=$(parallel -j $NCPUS -k "notempty {} {#}" ::: ${RUNACC[@]})
+RUNACC=($(for i in $INDEX; do echo ${RUNACC[$i]} ; done))
+RUNASP=($(for i in $INDEX; do echo ${RUNASP[$i]} ; done))
+RUNMD5=($(for i in $INDEX; do echo ${RUNMD5[$i]} ; done))
+cat log.cutadapt.*.tmp > log.cutadapt.probe.txt
+rm log.cutadapt.*.tmp
+echo -e "Run accessions with probe match:\n${#RUNACC[@]} out of $NBLIB\n"
+
+# 4. guess primers and remove, or not
+if [ -z "$FORWARD" ] || [ -z "$REVERSE" ]
+then
+	PRIMERS=none
+	for i in ${RUNACC[@]}
+	do
+		if [ $LAYOUT == "SINGLE" ]
+		then
+			mv $LABEL.$i.fastq.gz $LABEL.$i.cut.fastq.gz
+		else
+			mv $LABEL.$i.R1.fastq.gz $LABEL.$i.R1.fwd.fastq.gz
+			mv $LABEL.$i.R2.fastq.gz $LABEL.$i.R2.rvs.fastq.gz
+		fi
+	done
+else
+	sed '/>/!s/^/^/' "$FORWARD" > primers.fwd
+	sed '/>/!s/^/^/' "$REVERSE" > primers.rvs
+	# guess from list of primers
+	if [ $LAYOUT == "SINGLE" ]
+	then
+		TESTACC=$(ls -S $LABEL.*.fastq.gz | head -1 | sed 's/'$LABEL'\.//;s/\.fastq\.gz//')
+		cutadapt -j $NCPUS -e 0 -O 15 -g file:primers.fwd --discard-untrimmed --info-file log.primers.forward.txt -o $LABEL.$TESTACC.forward.fastq.gz $LABEL.$TESTACC.fastq.gz > log.cutadapt.forward.txt
+		cutadapt -j $NCPUS -e 0 -O 15 -g file:primers.rvs --discard-untrimmed --info-file log.primers.reverse.txt -o $LABEL.$TESTACC.reverse.fastq.gz $LABEL.$TESTACC.fastq.gz > log.cutadapt.reverse.txt
+		TESTCOUNT=$(gunzip -ck $LABEL.$TESTACC.fastq.gz | grep -c "^+$")
+		TESTFWD=$(gunzip -ck $LABEL.$TESTACC.forward.fastq.gz | grep -c "^+$")
+		TESTRVS=$(gunzip -ck $LABEL.$TESTACC.reverse.fastq.gz | grep -c "^+$")
+		if [ $TESTFWD -ge $(($TESTCOUNT/10+1)) ] || [ $TESTRVS -ge $(($TESTCOUNT/10+1)) ]
+		then
+			if [ $TESTFWD -gt $TESTRVS ]
+			then
+				DIR=fwd
+				FWDGUESS=$(awk 'BEGIN{FS=NFS="\t"}NF==11{print $8}' log.primers.forward.txt | sort | uniq -c | awk -v C=$TESTCOUNT '$1>C*0.1{print $2}')
+				FWDSEQ=$(sed -n '/>'$FWDGUESS'/{n;s/\^//;p;}' primers.fwd)
+				RVSGUESS=$(awk 'BEGIN{FS=NFS="\t"}NF==11{print $8}' log.primers.reverse.txt | sort | uniq -c | awk -v C=$TESTCOUNT '$1>C*0.1{print $2}')
+				if [ -z $RVSGUESS ]
+				then
+					RVSGUESS=$(paste primers.fwd primers.rvs | grep $FWDGUESS | cut -f 2)
+					RVSSEQ=$(paste primers.fwd primers.rvs | grep $FWDSEQ | cut -f 2)
+				else
+					RVSSEQ=$(sed -n '/>'$RVSGUESS'/{n;s/\^//;p;}' primers.rvs)
+				fi
+			else
+				DIR=rvs
+				FWDGUESS=$(awk 'BEGIN{FS=NFS="\t"}NF==11{print $8}' log.primers.reverse.txt | sort | uniq -c | awk -v C=$TESTCOUNT '$1>C*0.1{print $2}')
+				FWDSEQ=$(sed -n '/>'$FWDGUESS'/{n;s/\^//;p;}' primers.rvs)
+				RVSGUESS=$(awk 'BEGIN{FS=NFS="\t"}NF==11{print $8}' log.primers.forward.txt | sort | uniq -c | awk -v C=$TESTCOUNT '$1>C*0.1{print $2}')
+				if [ -z $RVSGUESS ]
+				then
+					RVSGUESS=$(paste primers.fwd primers.rvs | grep $FWDGUESS | cut -f 1)
+					RVSSEQ=$(paste primers.fwd primers.rvs | grep $FWDSEQ | cut -f 1)
+				else
+					RVSSEQ=$(sed -n '/>'$RVSGUESS'/{n;s/\^//;p;}' primers.fwd)
+				fi
+			fi
+			PRIMERS=$(echo "forward:${FWDGUESS}-${FWDSEQ};reverse:${RVSGUESS}-${RVSSEQ}")
+			RVSSEQRC=$(echo -e ">rvs\n$RVSSEQ" | vsearch --quiet --fastx_revcomp - --fastaout - | tail -1)
+			for i in ${RUNACC[@]}
+			do
+				cutadapt -j $NCPUS -e 0 -O 15 -g ^$FWDSEQ --discard-untrimmed $LABEL.$i.fastq.gz 2> log.cutadapt.primers.$i.fwd.txt | cutadapt -j $NCPUS -e 0 -O 15 -a $RVSSEQRC -o $LABEL.$i.forward.fastq.gz - >> log.cutadapt.primers.$i.fwd.txt
+			done
+		else
+			PRIMERS=none
+			for i in ${RUNACC[@]}
+			do
+				mv $LABEL.$i.fastq.gz $LABEL.$i.cut.fastq.gz
+			done
+		fi
+	else
+		TEST=$(ls -S $LABEL.*.R1.fastq.gz | head -1 | sed 's/'$LABEL'\.//;s/\.R1\.fastq\.gz//')
+		cutadapt -j $NCPUS -e 0 -O 15 -g file:primers.fwd --discard-untrimmed --info-file log.primers.forward.txt -o $LABEL.$TEST.R1.forward.fastq.gz $LABEL.$TEST.R1.fastq.gz > log.cutadapt.forward.txt
+		cutadapt -j $NCPUS -e 0 -O 15 -g file:primers.rvs --discard-untrimmed --info-file log.primers.reverse.txt -o $LABEL.$TEST.R2.reverse.fastq.gz $LABEL.$TEST.R2.fastq.gz > log.cutadapt.reverse.txt
+		rm $LABEL.$TEST.R1.forward.fastq.gz $LABEL.$TEST.R2.reverse.fastq.gz log.cutadapt.forward.txt log.cutadapt.reverse.txt
+		# if primers are found in more than 10% of the test library reads, used them to cut
+		TESTCOUNT=$(gunzip -ck $LABEL.$TEST.R1.fastq.gz | grep -c "^+$")
+		if [ $(awk 'BEGIN{s=0}NF>5{s+=1}END{print s}' log.primers.forward.txt) -ge $((TESTCOUNT/10+1)) ] || [ $(awk 'BEGIN{s=0}NF>5{s+=1}END{print s}' log.primers.reverse.txt) -ge $((TESTCOUNT/10+1)) ]
+		then
+			FWDGUESS=$(awk 'BEGIN{FS=NFS="\t"}NF==11{print $8}' log.primers.forward.txt | sort | uniq -c | awk -v C=$TESTCOUNT '$1>C*0.1{print $2}')
+			wobble () { sed 's/\(.\)/\1 /g' | awk -v M=18 '{for(i=1;i<=M;i++){if(NR==1){a[i]=$i} else {if(a[i]!~$i){a[i]=a[i]" "$i}}}}END{for(i=1;i<=M;i++){split(a[i],b," ");asort(b);for(j=1;j<=length(b);j++){printf "%s",b[j]};printf "\n"}}' | nl | sort -k 2,2 | join -a 1 -1 2 -2 2 - <(sort -k 2,2 $BTK/utils/IUPAC.txt) | sort -k 2,2n | awk '{if(NF>2){printf "%s",$3} else printf "%s",$1}END{printf "\n"}' ; }
+			if [ -z FWDGUESS ]
+			then
+				gunzip -ck $LABEL.$TEST.R1.fastq.gz | sed -n '/^+$/{g;1!p;};h' | cut -c 1-18 | awk '{print ">"NR"\n"$1}' | vsearch --quiet --derep_fulllength - --minseqlength 18 --sizeout -output - | vsearch --quiet --fastx_filter - --fastq_maxns 0 --sizeout --fastaout $LABEL.$TEST.fwd.primers.fasta
+				swarm -f -z -t $NCPUS -l /dev/null -w $LABEL.$TEST.forward.primer.fasta -o $LABEL.$TEST.forward.primer.names $LABEL.$TEST.fwd.primers.fasta
+				FWDSEQ=$(sed '$!N;s/\n/ /;s/>//;s/;size=\([0-9]*\);/ \1/' $LABEL.$TEST.forward.primer.fasta | sort -k 2,2nr | awk 'NR==1{print $1}' | join - <(sed 's/;size=[0-9]*//g' $LABEL.$TEST.forward.primer.names | sort -k 1,1) | tr " " "\n" | sort | join - <(sed '$!N;s/\n/ /;s/>//;s/;size=[0-9]*//' $LABEL.$TEST.fwd.primers.fasta | sort -k 1,1) | awk '{print $2}' | wobble)
+				FWDGUESS="guess"
+				rm $LABEL.$TEST.forward.primer.fasta $LABEL.$TEST.forward.primer.names $LABEL.$TEST.fwd.primers.fasta
+			else
+				FWDSEQ=$(sed -n '/>'$FWDGUESS'/{n;s/\^//;p;}' primers.fwd)
+			fi
+			RVSGUESS=$(awk 'BEGIN{FS=NFS="\t"}NF==11{print $8}' log.primers.reverse.txt | sort | uniq -c | awk -v C=$TESTCOUNT '$1>C*0.1{print $2}')
+			if [ -z RVSGUESS ]
+			then
+				gunzip -ck $LABEL.$TEST.R2.fastq.gz | sed -n '/^+$/{g;1!p;};h' | cut -c 1-18 | awk '{print ">"NR"\n"$1}' | vsearch --quiet --derep_fulllength - --minseqlength 18 --sizeout -output - | vsearch --quiet --fastx_filter - --fastq_maxns 0 --sizeout --fastaout $LABEL.$TEST.rvs.primers.fasta
+				swarm -f -z -t $NCPUS -l /dev/null -w $LABEL.$TEST.reverse.primer.fasta -o $LABEL.$TEST.reverse.primer.names $LABEL.$TEST.rvs.primers.fasta
+				RVSSEQ=$(sed '$!N;s/\n/ /;s/>//;s/;size=\([0-9]*\);/ \1/' $LABEL.$TEST.reverse.primer.fasta | sort -k 2,2nr | awk 'NR==1{print $1}' | join - <(sed 's/;size=[0-9]*//g' $LABEL.$TEST.reverse.primer.names | sort -k 1,1) | tr " " "\n" | sort | join - <(sed '$!N;s/\n/ /;s/>//;s/;size=[0-9]*//' $LABEL.$TEST.rvs.primers.fasta | sort -k 1,1) | awk '{print $2}' | wobble)
+				RVSGUESS="guess"
+				rm $LABEL.$TEST.reverse.primer.fasta $LABEL.$TEST.reverse.primer.names $LABEL.$TEST.rvs.primers.fasta
+			else
+				RVSSEQ=$(sed -n '/>'$RVSGUESS'/{n;s/\^//;p;}' primers.rvs)
+			fi
+			PRIMERS=$(echo "forward:${FWDGUESS}-${FWDSEQ};reverse:${RVSGUESS}-${RVSSEQ}")
+			for i in ${RUNACC[@]}
+			do
+				cutadapt -j $NCPUS -e 0.2 -g ^$FWDSEQ -G ^$RVSSEQ --discard-untrimmed -o $LABEL.$i.R1.fwd.fastq.gz -p $LABEL.$i.R2.rvs.fastq.gz $LABEL.$i.R1.fastq.gz $LABEL.$i.R2.fastq.gz > log.cutadapt.primers.$i.fwd.txt
+			done
+		else
+			PRIMERS=none
+			for i in ${RUNACC[@]}
+			do
+				mv $LABEL.$i.R1.fastq.gz $LABEL.$i.fwd.fastq.gz
+				mv $LABEL.$i.R2.fastq.gz $LABEL.$i.rvs.fastq.gz
+			done
+		fi
+	fi
+	rm log.primers.forward.txt log.primers.reverse.txt
+
+	# check if bidirectionnal sequencing
+	if [ $PRIMERS == "none" ]
+	then
+		:
+	elif [ $LAYOUT == "SINGLE" ]
+	then
+		if ( [ $DIR == "fwd" ] && [ $TESTRVS -ge $(($TESTCOUNT/10)) ] ) || ( [ $DIR == "rvs" ] && [ $TESTFWD -ge $(($TESTCOUNT/10)) ] )
+		then
+			FWDSEQRC=$(echo -e ">fwd\n$FWDSEQ" | vsearch --quiet --fastx_revcomp - --fastaout - | tail -1)
+			for i in ${RUNACC[@]}
+			do
+				# get reads starting with reverse primer, reverse-complement and add at the end of reads with forward primer
+				cutadapt -j $NCPUS -e 0 -O 15 -g ^$RVSSEQ --discard-untrimmed $LABEL.$i.fastq.gz 2> log.cutadapt.primers.$i.rvs.txt | cutadapt -j $NCPUS -e 0 -O 15 -a $FWDSEQRC -o $LABEL.$i.reverse.fastq.gz - >> log.cutadapt.primers.$i.rvs.txt
+				vsearch --quiet --fastx_revcomp $LABEL.$i.reverse.fastq.gz --fastqout - | cat <(gunzip -ck $LABEL.$i.forward.fastq.gz) - | gzip > $LABEL.$i.cut.fastq.gz
+				rm $LABEL.$i.forward.fastq.gz $LABEL.$i.reverse.fastq.gz
+			done
+		else
+			for i in ${RUNACC[@]}
+			do
+				mv $LABEL.$i.forward.fastq.gz $LABEL.$i.cut.fastq.gz
+			done
+		fi
+		cat log.cutadapt.primers.*.txt > log.cutadapt.primers.txt && rm log.cutadapt.primers.*.txt
+	else
+		cutadapt -j $NCPUS -e 0 -g $FWDSEQ --discard-untrimmed --info-file log.primers.forward.R2.txt -o $LABEL.$TEST.R2.forward.fastq.gz $LABEL.$TEST.R2.fastq.gz > log.cutadapt.forward.R2.txt
+		BIDIR=$(awk -v C=$TESTCOUNT 'NF==11{s+=1}END{if(s>C*0.1){print "yes"} else print "no"}' log.primers.forward.R2.txt)
+		rm log.primers.forward.R2.txt $LABEL.$TEST.R2.forward.fastq.gz log.cutadapt.forward.R2.txt
+		if [ $BIDIR == "yes" ]
+		then
+			for i in ${RUNACC[@]}
+			do
+				cutadapt -j $NCPUS -e 0.2 -g $RVSSEQ -G $FWDSEQ --discard-untrimmed -o $LABEL.$i.R1.rvs.fastq.gz -p $LABEL.$i.R2.fwd.fastq.gz $LABEL.$i.R1.fastq.gz $LABEL.$i.R2.fastq.gz > log.cutadapt.primers.$i.rvs.txt
+				vsearch --quiet --fastx_revcomp $LABEL.$i.R2.fwd.fastq.gz --fastqout - | cat <(gunzip -ck $LABEL.$i.R1.fwd.fastq.gz) - | gzip > $LABEL.$i.fwd.fastq.gz
+				vsearch --quiet --fastx_revcomp $LABEL.$i.R1.rvs.fastq.gz --fastqout - | cat <(gunzip -ck $LABEL.$i.R2.rvs.fastq.gz) - | gzip > $LABEL.$i.rvs.fastq.gz
+				rm $LABEL.$i.R1.fastq.gz $LABEL.$i.R2.fastq.gz $LABEL.$i.R1.fwd.fastq.gz $LABEL.$i.R2.fwd.fastq.gz $LABEL.$i.R2.rvs.fastq.gz $LABEL.$i.R1.rvs.fastq.gz
+			done
+		else
+			for i in ${RUNACC[@]}
+			do
+				mv $LABEL.$i.R1.fwd.fastq.gz $LABEL.$i.fwd.fastq.gz
+				mv $LABEL.$i.R2.rvs.fastq.gz $LABEL.$i.rvs.fastq.gz
+				rm $LABEL.$i.R1.fastq.gz $LABEL.$i.R2.fastq.gz
+			done
+		fi
+		cat log.cutadapt.primers.*.txt > log.cutadapt.primers.txt && rm log.cutadapt.primers.*.txt
+	fi
+fi
+echo -e "Guess primers:\n${PRIMERS}\n"
+
+# 5. pair-end assembly, dereplicate and remove reads with N
+if [ $LAYOUT == "PAIRED" ]
+then
+	parallel -j $NCPUS "pandaseq -f $LABEL.{}.fwd.fastq.gz -r $LABEL.{}.rvs.fastq.gz -g log.pairend.$LABEL.{}.txt -A $PALG -o 10 -t 0.6 -T 1 -w $LABEL.{}.pairend.fasta" ::: ${RUNACC[@]}
+	cat log.pairend.*.txt > log.pairend.txt && rm log.pairend.*.txt $LABEL.*.fwd.fastq.gz $LABEL.*.rvs.fastq.gz
+	TYPE=pairend
+else
+	TYPE=cut
+fi
+parallel -j $NCPUS "vsearch --quiet --derep_fulllength $LABEL.{}.$TYPE.fasta --sizeout -output - | vsearch --quiet --fastx_filter - --fastq_maxns 0 --relabel_sha1 --sizeout --fastaout $LABEL.{}.ok.fasta" ::: ${RUNACC[@]}
+rm $LABEL.*.pairend.fasta
+
+# 6. bioproject dereplicate and clustering
+cat $LABEL.*.ok.fasta | vsearch --quiet --derep_fulllength - --sizeout -output - | swarm -f -z -l /dev/null -t $NCPUS -w $LABEL.$BIOPROJ.swarm.fasta -o $LABEL.$BIOPROJ.swarm.names
+
+# 7. Remove low abundant OTUs and chimera
+TOTAL=$(sed 's/[^ ]*;size=//g' $LABEL.$BIOPROJ.swarm.names | tr " " "\n" | awk '{s+=$1}END{print s}')
+echo -e "Probe was found in a total of $TOTAL reads\n"
+if [ $TOTAL -lt 50 ]
+then
+	SIZEF=1
+fi
+vsearch --quiet --fastx_filter $LABEL.$BIOPROJ.swarm.fasta --minsize $SIZEF --fastaout - | vsearch --uchime_denovo - --nonchimeras $LABEL.$BIOPROJ.fasta
+
+# 8. taxonomic identification
+TEMPLATE=/home/lentendug/databases/DeltaMP/pr2_4.12.0
+IDDEF=2
+vsearch --no_progress --usearch_global $LABEL.$BIOPROJ.fasta --threads $NCPUS --db ${TEMPLATE}.udb --dbmask none --qmask none --rowlen 0 --notrunclabels --userfields query+id${IDDEF}+target --maxaccepts 0 --maxrejects 32 --top_hits_only --output_no_hits --id 0.6 --iddef ${IDDEF} --userout $LABEL.$BIOPROJ.hits
+# consensus taxonomy
+CONS=60
+lca() {
+	parallel --recstart ">" --remove-rec-sep --pipe -k -N1 awk -v cons=$CONS -f $BTK/utils/lca_vsearch.awk
+}
+export -f lca
+export CONS BTK
+sed 's/;\t/\t/;s/;$//;s/;tax=/\t/' $LABEL.$BIOPROJ.hits | sort --parallel=$NCPUS -k 1,1 -k 4,4 | awk '$1 != p{printf ">"}{p=$1}1' | parallel -j $NCPUS --recstart ">" --pipe -k lca > $LABEL.$BIOPROJ.taxonomy
+
+# 9. OTU table
+NBOTUS=$(sed -n '$=' $LABEL.$BIOPROJ.taxonomy)
+grep ">" $LABEL.$BIOPROJ.fasta | sed 's/>//;s/;s.*//' | sort | join - <(sed 's/;size=[0-9]*//g' $LABEL.$BIOPROJ.swarm.names | sort -k 1,1) | awk '{print $1,$1;if(NF>2){for(i=2;i<=NF;i++){print $i,$1}}}' | sort -k 1,1 > $LABEL.$BIOPROJ.names
+cut -d " " -f 2 $LABEL.$BIOPROJ.names | sort -u > $LABEL.$BIOPROJ.otu
+# at biosample level
+SAMACC=($(cut -f 3 $PROJ.libraries.tsv))
+SAMACC=($(for i in $INDEX; do echo ${SAMACC[$i]} ; done | sort -u))
+while read sam libs
+do
+	lib=(${libs//,/ })
+	cut -f 1 $LABEL.$BIOPROJ.otu > tmp.otu
+	for i in ${lib[@]}
+	do
+		sed -n '/>/{s/>//;s/;size=/ /p}' $LABEL.$i.ok.fasta | sort -k 1,1 | join $LABEL.$BIOPROJ.names - | sort -k 2,2 | awk '{if(NR==1){p=$2;s=$3} else {if($2==p){s+=$3} else {print p,s;p=$2;s=$3}}}END{print p,s}' | sort -k 1,1 | join -o 0,2.2 -e 0 -a 1 tmp.otu - | cut -d " " -f 2 | paste tmp.otu - > tmp2.otu && mv tmp2.otu tmp.otu
+	done
+	awk '{s=0;for(i=2;i<=NF;i++){s+=$i};print s}' tmp.otu | paste $LABEL.$BIOPROJ.otu - > tmp.$LABEL.$BIOPROJ.otu && mv tmp.$LABEL.$BIOPROJ.otu $LABEL.$BIOPROJ.otu
+done < <(awk -v I=$(echo $INDEX | tr " " "#") 'BEGIN{split(I,a,"#");for(i in a){b[a[i]+1]="set"};FS=OFS="\t"}NR in b{print $3,$6}' $PROJ.libraries.tsv | sort -k 1,1 | awk '{if(NR==1){p=$1;printf "%s %s",$1,$2} else {if($1==p){printf ",%s",$2} else {p=$1;printf "\n%s %s",$1,$2}}}END{printf "\n"}')
+rm tmp.otu $LABEL.*.ok.fasta
+awk 'BEGIN{FS=OFS="\t"}{s=0;for(i=2;i<=NF;i++){s+=$i};print s,$0}' $LABEL.$BIOPROJ.otu | sort -k 2,2 -t $'\t' | join -1 2 -t $'\t' - <(sed 's/;size=[0-9]*//;s/ /\t/g' $LABEL.$BIOPROJ.taxonomy | sort -k 1,1 -t $'\t') | sort -k 2,2nr -t $'\t' | awk -v L=${#NBOTUS} '{printf "Otu%0"L"d\t%s\n",NR,$0}' | cat <(echo "OTU repseq total ${SAMACC[@]} similarity taxonomy reference" | tr " " "\t") - > $LABEL.$BIOPROJ.OTUs.tsv
+
+# 10. BIOM table with samples metadata
+# get metadata
+mkdir metadata && cd metadata
+for i in ${SAMACC[@]}
+do
+	wget -nv -O $i.xml http://www.ebi.ac.uk/ena/data/view/$i\&display=xml
+done
+grep "<TAG>" *.xml | sed 's/^.*<TAG>\([^<]*\)<\/TAG>.*$/\1/;s/\//\\\\\\\//g' | sort -u > tags.txt
+for i in ${SAMACC[@]}
+do
+	TAX=$(sed -n '/TAXON_ID/{s/^.*>\([^<]*\)<.*$/\1/p;}' $i.xml)
+	SCN=$(sed -n '/SCIENTIFIC_NAME/{s/^.*>\([^<]*\)<.*$/\1/p;}' $i.xml)
+	while read tag
+	do
+		if grep -q ">$tag<" $i.xml
+		then
+			sed -n '/>'"$tag"'</{n;s/^.*>\([^<]*\)<.*$/\1/p;}' $i.xml | sed 's/^\([0-9]*\),\([0-9]*\)$/\1.\2/' | sed -e :a -e '$!N;s/\n/ | /;ta' -e 'P;D'
+		else
+			echo "NA"
+		fi
+	done < tags.txt | tr "\n" "\t" | sed 's/\t$//' | paste <(echo -e "$i\t$BIOPROJ\t$PLATF\t$PRIMERS\t$TAX\t$SCN") -
+done | sed 's/\t/\"\t\"/g;s/$/\"/;s/\"//' | cat <(paste <(echo -e "#sample_accession\tbioproject_accession\tsequencing_platform\tfound_primers\ttaxon_id\tscientific_name") <(tr "\n" "\t" < tags.txt | sed 's/ /_/g;s/\\//g;s/$/\n/')) - > ../$BIOPROJ.metadata.txt
+cd .. && rm -r metadata
+# make biom file
+cut -f 1,4-$((${#SAMACC[@]}+3)) $LABEL.$BIOPROJ.OTUs.tsv | sed '1s/^/#/' > $LABEL.$BIOPROJ.otu
+biom convert -i $LABEL.$BIOPROJ.otu -o tmp.json.biom  --table-type="OTU table" --to-json
+cut -f 1-3,$((${#SAMACC[@]}+4))- $LABEL.$BIOPROJ.OTUs.tsv | awk 'BEGIN{FS=OFS="\t"}{if(NR==1){sub("$","\tbootstrap",$5);print} else{print $1,$2,$3,$4,gensub("\\([0-9]*\\)","","g",$5),gensub("[^;]*\\(([0-9]*)\\);","\\1;","g",$5),$6}}' | sed 's/;\t/\t/g;1s/^/#/' > $LABEL.$BIOPROJ.ctaxo
+while read var val; do read -a $var <<<`echo $val` ; done < <($BTK/utils/transpose_tab $BIOPROJ.metadata.txt | sed 's/\"//g' | awk 'NR>1{sum=0;for(i=2;i<=NF;i++){if($i!=$i+0){next}};n=$1;sub("^[^\t]*\t","",$0);if($0 ~ /\./){f=f","n} else j=j","n}END{printf "%s\n%s\n", f,j}' | sed '1s/^,*/FLOAT\tsimilarity,/;2s/^,*/INTEGER\ttotal,/;s/,$//')
+biom add-metadata -i tmp.json.biom -o $LABEL.$BIOPROJ.json.biom --output-as-json --observation-metadata-fp $LABEL.$BIOPROJ.ctaxo --sample-metadata-fp $BIOPROJ.metadata.txt --sc-separated taxonomy,bootstrap ${INTEGER/#/--int-fields } ${FLOAT/#/--float-fields }
+
+# 11. final outputs
+gzip -c $LABEL.$BIOPROJ.json.biom > ../$LABEL.$PROJ.biom.gz
+sed '/>/s/;.*//' $LABEL.$BIOPROJ.fasta | seqkit seq -w 0 | gzip -c > ../$LABEL.$PROJ.fasta.gz
+tar czf ../log.$PROJ.tar.gz log.*.txt
+if [ -z $DEBUG ]
+then
+	cd ..
+	rm -r $PROJ /tmp/probe_sra.$STIME.set
+else
+	comm -23 <(set -o posix; set | sort) <(sort /tmp/probe_sra.$STIME.set) | tr "=" "\t" | grep -v "^[a-z]\|^BASH_" | grep -P -v "^PWD\t" | sed "s/'//g" > $PROJ.env
+	rm /tmp/probe_sra.$STIME.set
+fi
+ETIME=`date +%s`
+echo "Execution time: $(date -d@$((ETIME - STIME)) -u +%H:%M:%S)"

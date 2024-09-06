@@ -1,0 +1,580 @@
+#!/bin/bash
+
+# Usage info
+show_help() {
+cat << EOF
+
+NAME
+	primcheck - in-silico PCR to control for taxonomic coverage, specificity and precision of barcoding gene
+	
+SYNOPSIS
+	Usage: ${0##*/} [ -bgh ] [-c clade_list ] [-d database] [ -e error ] [ -f forward_name ] [ -j cores ] [ -l long_output ] [ -o outgroup_resolution ] [ -p percent ] [ -r reverse_name ] [ -t target_resoution ] [-u user_defined_taxonomy_rank ] target_clade forward_primer reverse_primer
+
+DESCRIPTION
+	-h display this help and exit
+	
+	-a avoid statistical summary at lower rank for target and outgroup clades
+	
+	-b debug on, avoid deleting temporay directory
+	
+	-c CLADE1[,CLADE2,...]
+		reduce the analyses to one or multiple clades, provided as comma separated list; the target clade have to be part of one of these provided clades; all non-target clades are considered as outgroup ; default use the entire database
+
+	-d DATABASE
+		full path to database description file. The description file is a tab-separated files with "fasta" and "taxonomy" in the first column, and the filenames of the corresponding fasta file and taxonomy file of the databases in the second column. An optional line labeled with "alignment" in the first column may be provided with the filename of the aligned version of the fasta file in the second column. All three or four files need to be in the same directory. The taxonomy format should be a sequence identifier, a tabulation and a taxonomy path of the format rank:taxonomy;rank:taxonomy[;rank:taxonomy]* . There is no default, this option is compulsory.
+	
+	-e ERROR
+		maximum number of error/mismatch allowed on the primer sequence, default: 0
+	
+	-f FORWARD_NAME
+		name of the forward primer to annotate outputs
+	
+	-g compute barcoding gap
+		
+	-j CORES
+		number of CPU cores to use in parallel, default: 1
+	
+	-l LONG_OUTPUT
+		filename for a long format data-frame output ready to be upload in R
+
+	-o OUTGROUP_RESOLUTION
+		taxonomic resolution for statistical summary of the outgroup clades, taxonomic path without this rank will be ignored, default: phylum
+	
+	-p PERCENT
+		percentage occurrence of a taxonomic rank in the database to be included in results, default: 0.9
+	
+	-q quick check of the barcoding indices on preformatted databases, ignore all options except -d, -e and -j
+	
+	-r REVERSE_NAME
+		name of the reverse primer to annotate outputs
+	
+	-t TARGET_RESOLUTION
+		taxonomic resolution for statistical summary of the target clade, taxonomic path without this rank will be ignored, default: family
+		
+	-u USER_DEFINED_TAXONOMY_RANK
+		comma separated list of taxonomy rank names corresponding to family, genus and species, default: family,genus,species
+	
+	-y TARGET_FILENAME
+		export the in-silico amplified sequences of the target group in fasta format to TARGET_FILENAME
+	
+	-z OUTGROUP_FILENAME
+		export the in-silico amplified sequences of the outgroup clades in fasta format to OUTGROUP_FILENAME
+	
+AUTHOR
+	Guillaume Lentendu
+
+COPYRIGHT
+	Copyright (C) 2021 Guillaume Lentendu
+
+EOF
+}
+
+error_help(){
+	echo "#Error: $1"
+	show_help | fmt -s -w $(tput cols)
+	rm -f /tmp/primcheck.$STIME.set
+	exit 1
+} >&2
+
+error_stop(){
+	echo -e "#Error: $1"
+	finish $DEBUG
+	exit 1
+} >&2
+
+length_stat(){
+	awk 'BEGIN{n=0}$0!~"^>"{n+=1;l=length($1);s+=l;sq+=l^2;if(n==1){m=l;M=l} else {if(l<m){m=l};if(l>M){M=l}}}END{if((s/n)==m || (s/n)==M){sd=0}else{sd=sq/n-(s/n)^2};printf "mean_length\t%.0f\nsd_length\t%.1f\nmin_length\t%s\nmax_length\t%s\n",s/n,sqrt(sd),m,M}'
+}
+export -f length_stat
+
+finish(){
+	if [ "$1" -eq 0 ]
+	then
+		cd ..
+		rm -r primcheck.$HASH $TEMPENV
+	else
+		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
+		ln -s $BTK/utils/load_env $PWD
+		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
+		>&2 echo "cd primcheck.$HASH && source ./load_env"
+		rm $TEMPENV
+		cd ..
+	fi
+}
+
+# store initial environment
+TEMPENV=$(mktemp)
+(set -o posix; set > $TEMPENV)
+START_TIME=`date +%s`
+INIT_DIR=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+
+# Option's default value
+DEBUG=0
+ERR=0
+FWDNAME=rvs
+NCPUS=1
+OUTGRES=phylum
+RVSNAME=rvs
+TARGRES=family
+RATE=0.9
+FAM=family
+GEN=genus
+SPE=species
+
+# get options
+while getopts ":abc:d:e:f:ghj:l:o:p:qr:t:u:y:z:" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			rm -f /tmp/primcheck.$STIME.set
+			exit 0;;
+		a)	AVOID=1;;
+		b)	DEBUG=1;;
+		c)	REDUCE=1; declare -a CLADE; CLADE=($(echo ${OPTARG} | tr "," " "));;
+		d)	[[ -s ${OPTARG} ]] || error_help " ${OPTARG} is not a file or is empty"
+			DBTMP=$(readlink -f "${OPTARG}"); DBF="${DBTMP##*/}"; DBDIR="${DBTMP%/*}";;
+		e)	ERR=${OPTARG};;
+		f)	FWDNAME=${OPTARG};;
+		g)	GAP=1;;
+		j)	NCPUS=${OPTARG};;
+		l)	LONGDF=${OPTARG};;
+		o)	OUTGRES=${OPTARG};;
+		p)	RATE=${OPTARG};;
+		q)	QUICK=1;;
+		r)	RVSNAME=${OPTARG};;
+		t)	TARGRES=${OPTARG};;
+		u)	read FAM GEN SPE < <(echo ${OPTARG} | tr "," " ");;
+		y)	TARGOUT=${OPTARG};;
+		z)	OUTGOUT=${OPTARG};;
+		\?)	error_help "# Invalid option: -${OPTARG}"
+			;;
+		:)	error_help "# Option -${OPTARG} requires an argument."
+			;;
+	esac
+done
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
+# target
+if [ -z "$1" ]
+then 
+	error_help "the target clade is missing."
+else
+	TARG=$1; shift
+fi
+
+# primers
+if [ -z "$1" ]
+then 
+	error_help "the forward primer is missing."
+elif [ -z "$2" ]
+then
+	error_help "the reverse primer is missing."
+else
+	FWD=${1^^} ; FWD=${FWD//I/N} ; shift # store as uppercase and replace inosine by N
+	RVS=${1^^} ; RVS=${RVS//I/N} ; shift
+fi
+
+# control
+FIU=$(sed 's/ //g' $BTK/utils/IUPAC.txt | fold -w1 | sort -u | join -v 2 - <(echo $FWD | fold -w1 | sort -u))
+RIU=$(sed 's/ //g' $BTK/utils/IUPAC.txt | fold -w1 | sort -u | join -v 2 - <(echo $RVS | fold -w1 | sort -u))
+if [ -n "$FIU" ]
+then
+	error_stop "the forward primer $FWDNAME ($FWD) contains non-IUPAC letters:\n$FIU"
+elif [ -n "$RIU" ]
+then
+	error_stop "the reverse primer $RVSNAME ($RVS) contains non-IUPAC letters:\n$RIU"
+fi
+
+# database
+DBFASTA=$(awk '$1=="fasta"{print $2}' $DBDIR/$DBF)
+DBTAXO=$(awk '$1=="taxonomy"{print $2}' $DBDIR/$DBF)
+DBALIGN=$(awk '$1=="alignment"{print $2}' $DBDIR/$DBF)
+
+# generate instance hash and working directory
+TEMP=$(mktemp)
+join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > $TEMP
+HASH=`cksum $TEMP | awk '{print $1}'`
+mkdir primcheck.$HASH && cd primcheck.$HASH
+mv $TEMP tmp_env
+
+# set generic variables
+RVSRC=$(echo -e ">rvs\n$RVS" | seqkit seq --quiet -t dna -r -p | tail -1)
+echo -e ">$FWDNAME\n$FWD\n>$RVSNAME\n$RVSRC" > primers.fasta
+DBCUT=$FWDNAME.$RVSNAME.tmp.db
+MISMF=$(awk -v E=$ERR -v F=${#FWD} 'BEGIN{printf "%.2f",E/F+0.005}')
+MISMR=$(awk -v E=$ERR -v R=${#RVS} 'BEGIN{printf "%.2f",E/R+0.005}')
+
+# database check
+if [ -n "$QUICK" ]
+then
+	ln -s $DBDIR/$DBTAXO tmp.db.taxo
+	seqkit seq -i -w0 $DBDIR/$DBFASTA > tmp.db.fasta
+else
+# Inform on the database
+	echo -e "# The database ${DBF%.*} contains $(sed -n '$=' $DBDIR/$DBTAXO) sequences.\n"
+	
+# reduce database to clades of interest
+	if [ -n "$REDUCE" ]
+	then
+		grep "$(echo ${CLADE[@]} | sed 's/^/:/;s/ /;\\|:/;s/$/;/')" $DBDIR/$DBTAXO | grep ";${FAM}:.*;${GEN}:.*;${SPE}:" > tmp.db.taxo
+		echo -e "# The database ${DBF%.*} is reduced to the $(sed -n '$=' tmp.db.taxo) sequences of the clade(s) ${CLADE[@]}.\n"
+	else
+		# if not reduced, use the lowest common taxonomic rank of all database sequence
+		grep ";${FAM}:.*;${GEN}:.*;${SPE}:" $DBDIR/$DBTAXO > tmp.db.taxo
+		declare -a CLADE
+		i=1 ; j="" ; while [ $(echo $j | wc -w) -le 1 ] ; do k=$j; j=$(cut -d ";" -f $i tmp.db.taxo | cut -d ":" -f 2 | sort -u) ; ((i++)) ; done ; CLADE=("$k")
+		# if no unique common rank, use the first taxonomic rank
+		if [ $(echo ${CLADE[@]} | wc -w ) -gt 1 ] ; then CLADE=($(cut -f 2 tmp.db.taxo | cut -d ";" -f 1 | cut -d ":" -f 2 | sort -u)) ; fi
+		echo -e "# The database ${DBF%.*} is reduced to the $(sed -n '$=' tmp.db.taxo) sequences with at least family to species taxonomic information.\n"
+	fi
+	seqkit seq -i $DBDIR/$DBFASTA | seqkit grep --quiet -w 0 -f <(cut -f 1 tmp.db.taxo) > tmp.db.fasta
+fi
+
+# use aligned database to find primer position and detect candidate reads
+if [ -n "$DBALIGN" ] && [ -z "$QUICK" ]
+then
+	cutadapt --quiet -j $NCPUS -g "$FWD;e=$MISMF;o=${#FWD}...$RVSRC;e=$MISMR;o=${#RVS}" --no-indels --trimmed-only -o tmp.cut_db.fasta tmp.db.fasta > cutadapt_all.log
+	if [ -s tmp.cut_db.fasta ]
+	then
+		seqkit grep --quiet -f <(grep -o "^>[^ ]*" tmp.cut_db.fasta | sed 's/>//') $DBDIR/$DBALIGN | seqkit sample --quiet -s100 -n 100 | goalign replace -s "." -n "-" | mafft --quiet --thread $NCPUS --auto --addfragments primers.fasta --mapout - > /dev/null
+		# select sequences spanning the amplified fragment including primer regions
+		seqkit grep --quiet -f <(cut -f 1 tmp.db.taxo) $DBDIR/$DBALIGN > tmp.db.align
+		goalign -t $NCPUS stats gaps --from-start -i tmp.db.align | awk '{print $1,$NF}' | paste - <(goalign -t $NCPUS stats gaps --from-end -i tmp.db.align | cut -f 2) | awk -v L=$(seqkit head -w 0 -n 1 tmp.db.align | awk 'NR==2{print length($1)}') -v P=$(grep -v "^>\|^#" primers.fasta.map | awk '{a[NR]=$3}END{print a[1]"#"a[FNR]}') 'BEGIN{split(P,a,"#")} $2<=a[1] && (L-$3)>=a[2]{print $1}' > tmp.db.accnos
+		rm tmp.db.align
+		# select candidate sequences
+		seqkit grep --quiet -w 0 -f tmp.db.accnos tmp.db.fasta > tmp.db.cand.fasta && mv tmp.db.cand.fasta tmp.db.fasta
+		awk '{print NR,$0}' tmp.db.taxo | sort --parallel=$NCPUS -k 2,2 | join -1 2 - <(sort --parallel=$NCPUS tmp.db.accnos) | sort --parallel=$NCPUS -k 2,2n | cut -d " " -f 1,3 | sed 's/ /\t/' > tmp.db.cand.taxo && mv tmp.db.cand.taxo tmp.db.taxo
+		echo -e "# Using the aligned verion of the database (${DBALIGN}), $(sed -n '$=' tmp.db.taxo) sequences spanning both primer annealing regions were kept as candidate sequences for in-silico PCR.\n"
+		echo "#Primer positions in the alignment"
+		POS=$(sed '/^#/d;s/.*, //' primers.fasta.map | sed -e :a -e '$!N;/>/!s/\n/ /;ta' -e 'P;D' | awk '{if($1~"^>"){sub(">","");print $1} else print $1,$NF}' | tr "\n" " ")
+		echo -e "forward primer\tstart position\tend position\treverse primer\tstart position\tend position" | cat - <(echo $POS | tr " " "\t") | $BTK/utils/coltab | cat - <(echo "")
+	else
+		echo "# No target sequences were amplified in-silico"
+		finish $DEBUG
+		exit 0
+	fi
+fi
+
+# stat on target in the database
+grep $TARG tmp.db.taxo > tmp.targ.taxo
+if [ -z "$QUICK" ]
+then
+	declare -a TARGRANKS
+	TARGRANKS=($(sed 's/.*;\('$TARGRES':\)/\1/' tmp.targ.taxo | tr ";" "\n" | grep -v "^$TARGRES:\|^no_rank:\|^clade:" | sed 's/:.*//' | sort --parallel=$NCPUS | uniq -c | awk -v N=$(sed -n '$=' tmp.targ.taxo) -v R=$RATE '$1>=N*R{print $2}'))
+	# reorder ranks if matching ncbi taxonomy
+	if [ -z "$(echo ${TARGRANKS[@]} | tr " " "\n"  | sort | join -v 1 - <(sort $BTK/utils/ncbi_ranks))" ]
+	then
+		TARGRANKS=($(echo ${TARGRANKS[@]} | tr " " "\n"  | sort | join -2 2 - <(nl $BTK/utils/ncbi_ranks | sort -k 2,2) | sort -k 2,2n | cut -d " " -f 1))
+	fi
+	# for all target sequences
+	for j in ${TARGRANKS[@]}
+	do
+		echo -e "${j}\t$(sed 's/.*;'$j':\([^;]*\).*/\1/' tmp.targ.taxo | sort --parallel=$NCPUS -u | wc -l)" 
+	done | cat - <(echo -e "sequences\t$(sed -n '$=' tmp.targ.taxo)") <(seqkit grep --quiet -w 0 -f <(cut -f 1 tmp.targ.taxo) tmp.db.fasta | length_stat) | sed "s/^/$TARG\t/" > tmp.targ.stat
+	
+	# report
+	echo "# Database statistics of target clade $TARG"
+	awk -v R="target" -f $BTK/utils/spread.awk tmp.targ.stat | $BTK/utils/coltab
+	
+	db_all_stat() {
+		grep ":$1;" tmp.$2.taxo > $1.tmp.$2.taxo
+		for ((i=3; i<=$#; i++))
+		do
+			echo -e "$1\t${!i}\t$(sed 's/.*;'${!i}':\([^;]*\).*/\1/' $1.tmp.$2.taxo | sort -u | wc -l)"
+		done
+		echo -e "$1\tsequences\t$(sed -n '$=' $1.tmp.$2.taxo)"
+		seqkit grep --quiet -w 0 -f <(cut -f 1 $1.tmp.$2.taxo) tmp.db.fasta | length_stat | sed "s/^/$1\t/"
+		rm $1.tmp.$2.taxo
+	}
+	export -f db_all_stat
+	
+	if [ -z "$AVOID" ]
+	then
+		# in lower taxonomic ranks
+		declare -a TARGCLADE
+		TARGCLADE=($(sed -n 's/.*;'$TARGRES':\([^;]*\).*/\1/p' tmp.targ.taxo | sort --parallel=$NCPUS -u | tr "\n" " "))
+		printf '%s\n' "${TARGCLADE[@]/%/ targ ${TARGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " db_all_stat > tmp.all_targ.stat
+		
+		echo -e "\n# At $TARGRES level"
+		awk -v R=$TARGRES -f $BTK/utils/spread.awk tmp.all_targ.stat | $BTK/utils/coltab
+	fi
+	echo -e "\n"
+fi
+
+# stat on outgroup in the database
+grep -v $TARG tmp.db.taxo > tmp.outg.taxo
+if [ -z "$QUICK" ]
+then
+	if [ -s tmp.outg.taxo ]
+	then
+		declare -a OUTGRANKS
+		OUTGRANKS=($(grep -o ";$OUTGRES:.*$" tmp.outg.taxo | tr ";" "\n" | grep -v "^$\|^$OUTGRES:\|^no_rank:\|^clade:" | sed 's/:.*//' | sort --parallel=$NCPUS | uniq -c | awk -v N=$(sed -n '$=' tmp.outg.taxo) -v R=$RATE '$1>=N*R{print $2}'))
+		# reorder ranks if matching ncbi taxonomy
+		if [ -z "$(echo ${OUTGRANKS[@]} | tr " " "\n"  | sort | join -v 1 - <(sort $BTK/utils/ncbi_ranks))" ]
+		then
+			OUTGRANKS=($(echo ${OUTGRANKS[@]} | tr " " "\n"  | sort | join -2 2 - <(nl -n ln $BTK/utils/ncbi_ranks | sort -k 2,2) | sort -k 2,2n | cut -d " " -f 1))
+		fi
+		# for all outgroup sequences
+		printf '%s\n' "${CLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " db_all_stat > tmp.outg.stat
+		
+		# report
+		if [ -n "${CLADE[@]}" ] ; then CLADETEXT=" constrained to the following clade(s): ${CLADE[@]}" ; fi
+		echo "# Database statistics of outgroups$CLADETEXT"
+		awk -v R="outgroup" -f $BTK/utils/spread.awk tmp.outg.stat | $BTK/utils/coltab
+		
+		if [ -z "$AVOID" ]
+		then
+			# in lower taxonomic ranks
+			declare -a OUTGCLADE
+			OUTGCLADE=($(sed -n 's/.*;*'$OUTGRES':\([^;]*\).*/\1/p' tmp.outg.taxo | sort --parallel=$NCPUS -u | tr "\n" " "))
+			printf '%s\n' "${OUTGCLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " db_all_stat > tmp.all_outg.stat
+			
+			echo -e "\n# At $OUTGRES level"
+			awk -v R=$OUTGRES -f $BTK/utils/spread.awk tmp.all_outg.stat | $BTK/utils/coltab
+		fi
+	else
+		echo -e "No outgroup in the database"
+	fi
+	echo -e "\n"
+fi
+
+# in-silico PCR with cutadapt
+cutadapt --quiet -j $NCPUS -g "$FWD;e=$MISMF;o=${#FWD}...$RVSRC;e=$MISMR;o=${#RVS}" --no-indels --trimmed-only --info-file cutadapt.info -o $DBCUT.fasta tmp.db.fasta > cutadapt.log
+sed -n '/^>/{s/>//;s/[\t ].*//;p}' $DBCUT.fasta | sort --parallel=$NCPUS | join -t $'\t' - <(sort --parallel=$NCPUS -k 1,1 -t $'\t' tmp.db.taxo) > $DBCUT.taxo
+
+# stat on in-silico amplified target
+grep $TARG $DBCUT.taxo > $DBCUT.targ.taxo
+grep -v $TARG $DBCUT.taxo > $DBCUT.outg.taxo
+
+if [ -s $DBCUT.targ.taxo ]
+then
+	if [ ! -z "$TARGOUT" ]
+	then
+		seqkit grep --quiet -w 0 -f <(cut -f 1 $DBCUT.targ.taxo) $DBCUT.fasta | paste - - | sed 's/^>//' | sort -k 1,1 | join - $DBCUT.targ.taxo | awk '{print ">"$1"\t"$3"\n"$2}' > ../$TARGOUT
+	fi
+	if [ ! -z "$OUTGOUT" ] && [ -s $DBCUT.outg.taxo ]
+	then
+		seqkit grep --quiet -w 0 -f <(cut -f 1 $DBCUT.outg.taxo) $DBCUT.fasta | paste - - | sed 's/^>//' | sort -k 1,1 | join - $DBCUT.outg.taxo | awk '{print ">"$1"\t"$3"\n"$2}' > ../$OUTGOUT
+	fi
+	if [ -z "$QUICK" ]
+	then
+		# for all target sequences
+		export DBCUT
+		parallel -j $NCPUS -k 'sed "s/.*;{}:\([^;]*\).*/\1/" $DBCUT.targ.taxo | sort -u | wc -l | sed "s/^/{}\t/"' ::: ${TARGRANKS[@]} | cat - <(echo -e "sequences\t$(sed -n '$=' $DBCUT.targ.taxo)") <(seqkit grep --quiet -w 0 -f <(cut -f 1 $DBCUT.targ.taxo) $DBCUT.fasta | length_stat) | sed "s/^/$TARG\t/" > tmp.in_silico_targ.stat
+		sed 's/\t/_/' tmp.targ.stat | nl -n ln -s $'\t' | sort --parallel=$NCPUS -k 2,2 -t $'\t' | join -t $'\t' -1 2 - <(sed 's/\t/_/' tmp.in_silico_targ.stat | sort --parallel=$NCPUS -k 1,1 -t $'\t') | sort --parallel=$NCPUS -k 2,2n -t $'\t' | sed 's/_/\t/' | awk 'BEGIN{FS=OFS="\t"}{if($2~"length"){print $1,$2,$5} else {printf "%s\t%s\t%.1f%s\n",$1,$2,$5/$4*100,"%\t("$5"/"$4")"}}' > tmp.in_silico_targ.perc
+		
+		# report
+		echo "# Database in-silico amplified sequence percentages of target clade $TARG"
+		awk -v R="target" -f $BTK/utils/spread.awk tmp.in_silico_targ.perc | $BTK/utils/coltab
+		
+		in_silico_stat() {
+			grep ":$1;" $DBCUT.$2.taxo > $1.cut.$2.taxo
+			if [ -s $1.cut.$2.taxo ]
+			then
+				for ((i=3; i<=$#; i++))
+				do
+					echo -e "${1}\t${!i}\t$(sed 's/.*;'${!i}':\([^;]*\).*/\1/' $1.cut.$2.taxo | sort -u | wc -l)"
+				done
+				echo -e "${1}\tsequences\t$(sed -n '$=' $1.cut.$2.taxo)"
+				seqkit grep --quiet -w 0 -f <(cut -f 1 $1.cut.$2.taxo) $DBCUT.fasta | length_stat | sed "s/^/$1\t/"
+			else
+				for ((i=3; i<=$#; i++)); do echo -e "$1\t${!i}\t0" ; done | cat - <(echo -e "$1\tsequences\t0") | cat - <(echo -e "mean_length\nsd_length\nmin_length\nmax_length" | sed "s/^/$1\t/;s/$/\tNA/")
+			fi
+			rm $1.cut.$2.taxo
+		}
+		export -f in_silico_stat
+		export DBCUT
+		
+		if [ -z "$AVOID" ]
+		then
+			# in lower taxonomic ranks
+			printf '%s\n' "${TARGCLADE[@]/%/ targ ${TARGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " in_silico_stat > tmp.in_silico_all_targ.stat
+			sed 's/\t/#/' tmp.all_targ.stat | nl -n ln -s $'\t' | sort --parallel=$NCPUS -k 2,2 -t $'\t' | join -t $'\t' -1 2 - <(sed 's/\t/#/' tmp.in_silico_all_targ.stat | sort --parallel=$NCPUS -k 1,1 -t $'\t') | sort --parallel=$NCPUS -k 2,2n -t $'\t' | sed 's/#/\t/' | awk 'BEGIN{FS=OFS="\t"}{if($2~"length"){print $1,$2,$5} else {printf "%s\t%s\t%.1f%s\n",$1,$2,$5/$4*100,"%\t("$5"/"$4")"}}' > tmp.in_silico_all_targ.perc
+			
+			echo -e "\n# At $TARGRES level"
+			awk -v R=$TARGRES -f $BTK/utils/spread.awk tmp.in_silico_all_targ.perc | $BTK/utils/coltab
+		fi
+		echo ""
+		
+		# sequence logo
+		## forward
+		cut -f 1,2,6,8 cutadapt.info | grep -v "\-1$" | sed 's/ [^\t]*\t/\t/' | sort --parallel=$NCPUS -k 1,1 -k 4,4 | join - <(cut -f 1 $DBCUT.targ.taxo) | tee tmp.in_silico_targ | sed -n '/;1$/p' | cut -f 3 -d " " | sed 's/\(.\)/\1 /g' | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{OFS="\t";l=0;split("A#C#G#T",n,"#")}{for(i=2;i<=NF;i++){p[i,$i]+=$1};if(NF>l){l=NF}}END{for(i=2;i<=l;i++){for(j in n){if( (i, n[j]) in p){print i-1,n[j],p[i,n[j]]} else print i-1,n[j],"0"}}}' > tmp.in_silico_targ.fwd.logo
+		echo "# Forward primer nucleotide frequency in in-silico amplified target sequences"
+		sed 's/\t0$/\t_/' tmp.in_silico_targ.fwd.logo | awk 'BEGIN{split("A#C#G#T",n,"#")}{l=$1;p[$1,$2]=$3}END{for(i in n){printf "%s",n[i];for(j=1;j<=l;j++){printf "\t%s", p[j,n[i]]};printf "\n"}}' | cat <(echo "$FWD" | fold -w1 | paste -s | sed 's/^/input:\t/') - <(awk 'BEGIN{p=1;f=""}{if($1==p){if($3>0){f=f$2}} else {print p,f;p=$1;if($3>0){f=$2}else{f=""}}}END{print p,f}'  tmp.in_silico_targ.fwd.logo | sort -k 2,2 | join -a 1 -1 2 -2 2 - <(sort -k 2,2 $BTK/utils/IUPAC.txt) | sort -k 2,2n | awk '{if(NF==2){print $1} else print $3}' | paste -s | sed 's/^/observed:\t/') | $BTK/utils/coltab
+		## reverse
+		sed -n '/;2$/p' tmp.in_silico_targ | awk '{print ">"$1"\n"$3}' | seqkit seq --quiet -t dna -r -p | grep -v "^>" | sed 's/\(.\)/\1 /g' | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{OFS="\t";l=0;split("A#C#G#T",n,"#")}{for(i=2;i<=NF;i++){p[i,$i]+=$1};if(NF>l){l=NF}}END{for(i=2;i<=l;i++){for(j in n){if( (i, n[j]) in p){print i-1,n[j],p[i,n[j]]} else print i-1,n[j],"0"}}}' > tmp.in_silico_targ.rvs.logo
+		echo -e "\n# Reverse primer nucleotide frequency in in-silico amplified target sequences"
+		sed 's/\t0$/\t_/' tmp.in_silico_targ.rvs.logo | awk 'BEGIN{split("A#C#G#T",n,"#")}{l=$1;p[$1,$2]=$3}END{for(i in n){printf "%s",n[i];for(j=1;j<=l;j++){printf "\t%s", p[j,n[i]]};printf "\n"}}' | cat <(echo "$RVS" | fold -w1 | paste -s | sed 's/^/input:\t/') - <(awk 'BEGIN{p=1;f=""}{if($1==p){if($3>0){f=f$2}} else {print p,f;p=$1;if($3>0){f=$2}else{f=""}}}END{print p,f}'  tmp.in_silico_targ.rvs.logo | sort -k 2,2 | join -a 1 -1 2 -2 2 - <(sort -k 2,2 $BTK/utils/IUPAC.txt) | sort -k 2,2n | awk '{if(NF==2){print $1} else print $3}' | paste -s | sed 's/^/observed:\t/') | $BTK/utils/coltab
+		echo -e "\n"
+		
+		# error profile
+		awk '{if(NR==1){p=$1;q=$2} else {if($1==p){q=q" "$2} else {print q;p=$1;q=$2}}}END{print q}' tmp.in_silico_targ | sort | uniq -c > tmp.in_silico_targ.err
+		awk -v E=$ERR '{C[$2,$3]=$1}END{for(i=0;i<=E;i++){if(i==0){printf "Reverse_mismatch %s @",i} else {printf "@ %s @",i};for(j=0;j<=E;j++){if( (j, i) in C){printf " %s",C[j,i]} else printf " 0"};printf "\n"};printf "\n"}' tmp.in_silico_targ.err | cat <(echo -e "#_Error_profile in @ in-silico amplified target sequences\nForward_mismatch : @ $(eval echo {0..$ERR})\n") - | column -t -e | sed 's/@/ /g;s/\([^ ]*\)\(  *\):/ \2\1/;s/_/ /g;/^#/s/  */ /g'
+	
+		# stat on in-silico amplified outgroup
+		if [ -s tmp.outg.taxo ]
+		then
+			if [ -s $DBCUT.outg.taxo ]
+			then
+				# for all outgroup sequences
+				printf '%s\n' "${CLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " in_silico_stat > tmp.in_silico_outg.stat
+				sed 's/\t/_/' tmp.outg.stat | nl -n ln -s $'\t' | sort -k 2,2 -t $'\t' | join -t $'\t' -1 2 - <(sed 's/\t/_/' tmp.in_silico_outg.stat | sort -k 1,1 -t $'\t') | sort -k 2,2n -t $'\t' | sed 's/_/\t/' | awk 'BEGIN{FS=OFS="\t"}{if($2~"length"){print $1,$2,$5} else {printf "%s\t%s\t%.1f%s\n",$1,$2,$5/$4*100,"%\t("$5"/"$4")"}}' > tmp.in_silico_outg.perc
+					
+				# report
+				echo "# Database in-silico amplified sequence percentages of outgroups$CLADETEXT"
+				awk -v R="outgroup" -f $BTK/utils/spread.awk tmp.in_silico_outg.perc | $BTK/utils/coltab
+				
+				if [ -z "$AVOID" ]
+				then
+					# in lower taxonomic ranks
+					printf '%s\n' "${OUTGCLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " in_silico_stat > tmp.in_silico_all_outg.stat
+					sed 's/\t/#/' tmp.all_outg.stat | nl -n ln -s $'\t' | sort -k 2,2 -t $'\t' | join -t $'\t' -1 2 - <(sed 's/\t/#/' tmp.in_silico_all_outg.stat | sort -k 1,1 -t $'\t') | sort -k 2,2n -t $'\t' | sed 's/#/\t/' | awk 'BEGIN{FS=OFS="\t"}{if($2~"length"){print $1,$2,$5} else {printf "%s\t%s\t%.1f%s\n",$1,$2,$5/$4*100,"%\t("$5"/"$4")"}}' > tmp.in_silico_all_outg.perc
+					echo -e "\n# At $OUTGRES level"
+					awk -v R=$OUTGRES -f $BTK/utils/spread.awk tmp.in_silico_all_outg.perc | $BTK/utils/coltab
+				fi
+				echo ""
+				
+				# sequence logo
+				## forward
+				cut -f 1-2,6,8 cutadapt.info | grep -v "\-1$" | sed 's/ [^\t]*\t/\t/' | sort --parallel=$NCPUS -k 1,1 -k 4,4 | join - <(cut -f 1 $DBCUT.outg.taxo) | tee tmp.in_silico_outg | sed -n '/;1$/p' | cut -f 3 -d " " | sed 's/\(.\)/\1 /g' | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{OFS="\t";l=0;split("A#C#G#T",n,"#")}{for(i=2;i<=NF;i++){p[i,$i]+=$1};if(NF>l){l=NF}}END{for(i=2;i<=l;i++){for(j in n){if( (i, n[j]) in p){print i-1,n[j],p[i,n[j]]} else print i-1,n[j],"0"}}}' > tmp.in_silico_outg.fwd.logo
+				echo "# Forward primer nucleotide frequency in in-silico amplified outgroup sequences"
+				sed 's/\t0$/\t_/' tmp.in_silico_outg.fwd.logo | awk 'BEGIN{split("A#C#G#T",n,"#")}{l=$1;p[$1,$2]=$3}END{for(i in n){printf "%s",n[i];for(j=1;j<=l;j++){printf "\t%s", p[j,n[i]]};printf "\n"}}' | cat <(echo "$FWD" | fold -w1 | paste -s | sed 's/^/input:\t/') - <(awk 'BEGIN{p=1;f=""}{if($1==p){if($3>0){f=f$2}} else {print p,f;p=$1;if($3>0){f=$2}else{f=""}}}END{print p,f}'  tmp.in_silico_outg.fwd.logo | sort -k 2,2 | join -a 1 -1 2 -2 2 - <(sort -k 2,2 $BTK/utils/IUPAC.txt) | sort -k 2,2n | awk '{if(NF==2){print $1} else print $3}' | paste -s | sed 's/^/observed:\t/') | $BTK/utils/coltab
+				## reverse
+				sed -n '/;2$/p' tmp.in_silico_outg | awk '{print ">"$1"\n"$3}' | seqkit seq --quiet -t dna -r -p | grep -v "^>" | sed 's/\(.\)/\1 /g' | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{OFS="\t";l=0;split("A#C#G#T",n,"#")}{for(i=2;i<=NF;i++){p[i,$i]+=$1};if(NF>l){l=NF}}END{for(i=2;i<=l;i++){for(j in n){if( (i, n[j]) in p){print i-1,n[j],p[i,n[j]]} else print i-1,n[j],"0"}}}' > tmp.in_silico_outg.rvs.logo
+				echo -e "\n# Reverse primer nucleotide frequency in in-silico amplified outgroup sequences"
+				sed 's/\t0$/\t_/' tmp.in_silico_outg.rvs.logo | awk 'BEGIN{split("A#C#G#T",n,"#")}{l=$1;p[$1,$2]=$3}END{for(i in n){printf "%s",n[i];for(j=1;j<=l;j++){printf "\t%s", p[j,n[i]]};printf "\n"}}' | cat <(echo "$RVS" | fold -w1 | paste -s | sed 's/^/input:\t/') - <(awk 'BEGIN{p=1;f=""}{if($1==p){if($3>0){f=f$2}} else {print p,f;p=$1;if($3>0){f=$2}else{f=""}}}END{print p,f}'  tmp.in_silico_outg.rvs.logo | sort -k 2,2 | join -a 1 -1 2 -2 2 - <(sort -k 2,2 $BTK/utils/IUPAC.txt) | sort -k 2,2n | awk '{if(NF==2){print $1} else print $3}' | paste -s | sed 's/^/observed:\t/') | $BTK/utils/coltab
+				echo -e "\n"
+				
+				# error profile
+				awk '{if(NR==1){p=$1;q=$2} else {if($1==p){q=q" "$2} else {print q;p=$1;q=$2}}}END{print q}' tmp.in_silico_outg | sort | uniq -c > tmp.in_silico_outg.err
+				awk -v E=$ERR '{C[$2,$3]=$1}END{for(i=0;i<=E;i++){if(i==0){printf "Reverse_mismatch %s @",i} else {printf "@ %s @",i};for(j=0;j<=E;j++){if( (j, i) in C){printf " %s",C[j,i]} else printf " 0"};printf "\n"};printf "\n"}' tmp.in_silico_outg.err | cat <(echo -e "#_Error_profile in @ in-silico amplified outgroup sequences\nForward_mismatch : @ $(eval echo {0..$ERR})\n") - | column -t -e | sed 's/@/ /g;s/\([^ ]*\)\(  *\):/ \2\1/;s/_/ /g;/^#/s/  */ /g'
+		
+			else
+				echo "# No outgroup sequences were amplified in-silico"
+			fi
+		fi
+		
+		# Barcoding gap: value separating intra-specific from intra-genus inter-specific sequence similarity; when no intra-specific distance (or more than 2 times less than intra-genus) the upper 95 % IC of intra-genus inter-specific similarity
+		# loop over genera, inside taget clades (e.g. avoid family level distances)
+		# at least 10 intra-genus / intra-species distances
+		# avoid "Genus_sp." which could create either intra-specifi or inter-specific distances
+		if [ -n "$GAP" ]
+		then
+			if [ $(grep -v "_sp\.\|_aff\.\|_cf\.\|_nr\." $DBCUT.targ.taxo | sed "s/.*;$GEN:\([^;]*\);.*/\1/" | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{s=0}$1>1{s+=$1*($1-1)/2}END{print s}') -gt 10 ]
+			then
+				CBG=1
+				echo "# Intra-clade similarity of in-silico amplified target sequences."
+				for i in ${TARGCLADE[@]} 
+				do
+					grep -v "_sp\.\|_aff\.\|_cf\.\|_nr\." $DBCUT.targ.taxo | sed -n "/;$TARGRES:$i;/s/\t.*;$GEN:\([^;]*\).*;$SPE:\([^;]*\).*$/\t\1\t\2/p" | sort --parallel=$NCPUS -k 1,1 -t $'\t' > $i.$DBCUT.taxo
+					if [ -s $i.$DBCUT.taxo ]
+					then
+						if [ $(cut -f 2 $i.$DBCUT.taxo | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{s=0}$1>1{s+=$1}END{print s}') -gt 1 ]
+						then
+							touch $i.sim
+							for j in $(cut -f 2 $i.$DBCUT.taxo | sort -u)
+							do
+								if [ $(grep -c -P "\t$j\t" $i.$DBCUT.taxo) -gt 1 ]
+								then
+									seqkit grep --quiet -w 0 -f <(awk -v J=$j 'BEGIN{FS="\t"}$2==J{print $1}' $i.$DBCUT.taxo) $DBCUT.fasta > $j.$i.fasta
+									sumatra -p $NCPUS $j.$i.fasta 2> /dev/null | sort --parallel=$NCPUS -k 1,1 | join - $i.$DBCUT.taxo | sort --parallel=$NCPUS -k 2,2 | join -1 2 - $i.$DBCUT.taxo | awk '{if($5==$7){print "species",$3} else print "genus",$3}' >> $i.sim
+									rm $j.$i.fasta
+								fi
+							done
+							# report mean (and 1st/3rd quartile if more than 7 values) for each intra ranks
+							 sort --parallel=$NCPUS -k 1,1 -k 2,2n $i.sim | awk '{if(NR==1){r=$1;n[r]=1;s[r]=$2} else {if($1==r){n[r]+=1;s[r]+=$2} else {r=$1;n[r]=1;s[r]+=$2}};p[r,n[r]]=$2} END {for(i in n){if(n[i]>6){t1=(n[i]-1)*0.25+1;t3=(n[i]-1)*0.75+1;v1=p[i,int(t1)];v3=p[i,int(t3)];if(t1>int(t1)){q1=v1+0.25*(p[i,int(t1+1)]-v1)} else q1=v;if(t3>int(t3)){q3=v3+0.75*(p[i,int(t3+1)]-v3)} else q3=v;printf "%s\t%.3f (%.3f-%.3f)\n", i,s[i]/n[i],q1,q3} else printf "%s\t%.3f (na-na)\n",i,s[i]/n[i]}}' | sort --parallel=$NCPUS -k 1,1 -t $'\t' | join -o 0,1.2 -a 2 -e "NA (na-na)" -t $'\t' - <(echo -e "genus\nspecies") | sed "s/^/$i\tintra-/"
+							rm $i.$DBCUT.taxo
+						else
+							echo -e "$i\tintra-genus\tNA (na-na)\n$i\tintra-species\tNA (na-na)"
+						fi
+					else
+						echo -e "$i\tintra-genus\tNA (na-na)\n$i\tintra-species\tNA (na-na)"
+					fi
+				done > tmp.targ.intra_simil.stat
+				awk -v R=$TARGRES -f $BTK/utils/spread.awk tmp.targ.intra_simil.stat | $BTK/utils/coltab
+				echo -e "\n"
+				
+				# Barcoding gap position (visualization possible with density plot of ggplot2)
+				# m1 = genus mean
+				# m2 = species mean
+				# s1 = genus stdev
+				# s2 = species stdev
+				# -(m1*s2^2-m2*s1^2+s1*s2*sqrt(2*log(s1/s2)*(s1^2-s2^2)+(m1-m2)^2))/(s1^2-s2^2)
+				IFS=$'\t' read BG DG DS < <(cat *.sim | sort --parallel=$NCPUS -k 1,1 -k 2,2n | awk '{if(NR==1){r=$1;n[r]=1;sum[r]=$2;sumsq[r]=($2)^2} else {if($1==r){n[r]+=1;sum[r]+=$2;sumsq[r]+=($2)^2} else {r=$1;n[r]=1;sum[r]+=$2;sumsq[r]=($2)^2}}} END {m1=sum["genus"]/n["genus"];s1=sqrt((sumsq["genus"]-sum["genus"]^2/n["genus"])/n["genus"]);m2=sum["species"]/n["species"];s2=sqrt((sumsq["species"]-sum["species"]^2/n["species"])/n["species"]);bg=-(m1*s2^2-m2*s1^2+s1*s2*sqrt(2*log(s1/s2)*(s1^2-s2^2)+(m1-m2)^2))/(s1^2-s2^2);printf "%.3f\t%.3f +/- %.3f\t%.3f +/- %.3f\n", bg,m1,s1,m2,s2}')
+				echo -e "# Barcoding gap\npredicted barcoding gap\tmean intra-genus distance\tmean intra-specific distance\n$BG\t$DG\t$DS" | $BTK/utils/coltab
+			else
+				echo "# There is not enough sequences to compute the barcoding gap"
+			fi
+		fi
+		echo -e "\n"
+	fi
+	
+	# Indices
+	CTT=$(sed "s/.*\t[^\t]*;${SPE}:\([^;]*\).*$/\1/" tmp.targ.taxo | sort -u | wc -l)
+	CNT=$(sed "s/.*\t[^\t]*;${SPE}:\([^;]*\).*$/\1/" tmp.outg.taxo | sort -u | wc -l)
+	CTG=$(sed "s/.*\t[^\t]*;${GEN}:\([^;]*\).*$/\1/" tmp.targ.taxo | sort -u | wc -l)
+	CNG=$(sed "s/.*\t[^\t]*;${GEN}:\([^;]*\).*$/\1/" tmp.outg.taxo | sort -u | wc -l)
+	sed "s/\t[^\t]*;${SPE}:\([^;]*\).*$/\t\1/" $DBCUT.targ.taxo | sort -k 1,1 > $DBCUT.targ.species
+	ATT=$(cut -f 2 $DBCUT.targ.species | sort -u | wc -l)
+	ANT=$(sed "s/.*\t[^\t]*;${SPE}:\([^;]*\).*$/\1/" $DBCUT.outg.taxo | sort -u | wc -l)
+	sed "s/\t[^\t]*;${GEN}:\([^;]*\).*$/\t\1/" $DBCUT.targ.taxo | sort -k 1,1 > $DBCUT.targ.genus
+	ATG=$(cut -f 2 $DBCUT.targ.genus | sort -u | wc -l)
+	ANG=$(sed "s/.*\t[^\t]*;${GEN}:\([^;]*\).*$/\1/" $DBCUT.outg.taxo | sort -u | wc -l)
+	#seqkit grep --quiet -w 0 -f <(cut -f 1 $DBCUT.targ.taxo) $DBCUT.fasta | obiuniq -i -p | sed -n "/>/{s/.*merged=\['//;s/'\];.*//;s/'//g;s/,/ /g;p}" | awk '{for(i=1;i<=NF;i++){print $i,NR}}' | sort -k 1,1 > $DBCUT.targ.uniq
+	# obiuniq replacement
+	seqkit grep --quiet -w 0 -f <(cut -f 1 $DBCUT.targ.taxo) $DBCUT.fasta | sed 's/>//' | paste - - | sort -k 2,2r | awk '{if(NR==1){prev=$2;printf "%s",$1} else {l=match(prev,$2);if(l>0){printf " %s",$1} else {prev=$2;printf "\n%s",$1}}}END{printf "\n"}' | sort -k 1,1 > $DBCUT.targ.uniq
+	WT=$(join $DBCUT.targ.uniq $DBCUT.targ.species | sort -k 2,2n -k 3,3 | awk '{if(NR==1){o=$2;p=$3;e=p;c=1} else {if($2==o){if($3!=p){p=$3;e=e" "p;c+=1}} else {if(c>1){print e};o=$2;p=$3;e=p;c=1}}}' | tr " " "\n" | sort | join -v 2 - <(cut -f 2 $DBCUT.targ.species | sort -u) | wc -l)
+	WG=$(join $DBCUT.targ.uniq $DBCUT.targ.genus | sort -k 2,2n -k 3,3 | awk '{if(NR==1){o=$2;p=$3;e=p;c=1} else {if($2==o){if($3!=p){p=$3;e=e" "p;c+=1}} else {if(c>1){print e};o=$2;p=$3;e=p;c=1}}}' | tr " " "\n" | sort | join -v 2 - <(cut -f 2 $DBCUT.targ.genus | sort -u) | wc -l)
+	# Barcode coverage
+	BCT=$(awk -v T=$ATT -v C=$CTT 'BEGIN{printf "%.3f",T/C}')
+	BCG=$(awk -v T=$ATG -v C=$CTG 'BEGIN{printf "%.3f",T/C}')
+	# Barcode specificity
+	BST=$(awk -v T=$ATT -v N=$ANT 'BEGIN{printf "%.3f",T/(T+N)}')
+	BSG=$(awk -v T=$ATG -v N=$ANG 'BEGIN{printf "%.3f",T/(T+N)}')
+	# Barcode resolution: how many species and genera uniquely identified with the amplified fragment?
+	BPT=$(awk -v T=$ATT -v W=$WT 'BEGIN{printf "%.3f",W/T}')
+	BPG=$(awk -v T=$ATG -v W=$WG 'BEGIN{printf "%.3f",W/T}')
+	
+	# definitions:
+	# 1. amount of candidate species Ct and genus Cg (also target CTt/CTg and non-target CNt/CNg): sequences with nucleotides in the aligned region containing each primer
+	# 2. amount of amplified species At and genus Ag (also target ATt/ATg and non-target ANt/ANg amplified)
+	# 3. amount of target species Wt and genus Wg with unshared set of sequences Wt (intra-specific/intra-genus variations allowed)
+	# 4. Bs-t: species barcode specificity as ATt/At
+	# 5. Bs-g: genus barcode specificity as ATg/Ag
+	# 6. Bc-t: species barcode coverage as ATt/CTt
+	# 7. Bc-g: genus barcode coverage as ATg/CTg
+	# 8. Br-t: species barcode resolution Wt/ATt
+	# 9. Br-g: genus barcode resolution Wg/ATg
+	
+	# report
+	echo -e "# Barcode specificity\nspecies barcode specificity\t$BST\ngenus barcode specificity\t$BSG\n\n# Barcode coverage\nspecies barcode coverage\t$BCT\ngenus barcode coverage\t$BCG\n\n# Barcode resolution\nspecies barcode resolution\t$BPT\ngenus barcode resolution\t$BPG\n" | $BTK/utils/coltab
+	
+	# long data-frame output
+	if [ -n "$LONGDF" ] && [ -z "$QUICK" ]
+	then
+cat <<EOF > make.df
+echo -e "target\tclade\t$TARG\ntarget\ttaxonomic rank of results\t$TARGRES\noutgroup\tclade\t${CLADE[@]}\noutgroup\ttaxonomic rank of results\t$OUTGRES" | sed 's/\t\([^\t]*\)$/\tcharacter\t\1/' | cat - <(echo -e "database\tfilename\t$DBF\nforward primer name\tcharacter\t$FWDNAME\nforward primer sequence\tcharacter\t$FWD\nreverse primer name\tcharacter\t$RVSNAME\nreverse primer sequence\tcharacter\t$RVS\nnumber of mismatch allowed\tnumeric\t$ERR" | sed 's/^/global\t/') | sed 's/^/parameter\t/'
+if [ -n "$DBALIGN" ] ; then echo "$POS" | awk 'BEGIN{OFS="\t"}{print \$1,"start position",\$2"\n"\$1,"end position",\$3"\n"\$4,"start position",\$5"\n"\$4,"end position",\$6}' | sed 's/^/alignment\tglobal\t/' ; fi
+if [ -s tmp.outg.stat ] ; then sed 's/^/target\t/' tmp.targ.stat | cat - <(sed 's/^/outgroup\t/' tmp.outg.stat) | sed 's/^/database\t/' ; else sed 's/^/database\ttarget\t/' tmp.targ.stat ; fi
+if [ -z "$AVOID" ] ; then if [ -s tmp.all_outg.stat ] ; then sed 's/^/target clade\t/' tmp.all_targ.stat | cat - <(sed 's/^/outgroup clade\t/' tmp.all_outg.stat) | sed 's/^/database\t/' ; else sed 's/^/database\ttarget clade\t/' tmp.all_targ.stat ; fi ; fi
+sed 's/^/in-silico\ttarget\t/' tmp.in_silico_targ.stat
+if [ -z "$AVOID" ] ; then sed 's/^/in-silico\ttarget clade\t/' tmp.in_silico_all_targ.stat ; fi
+cat <(sed '/\t0\$/d;s/^/forward primer\ttarget\t/' tmp.in_silico_targ.fwd.logo) <(sed '/\t0\$/d;s/^/reverse primer\ttarget\t/' tmp.in_silico_targ.rvs.logo)
+awk 'BEGIN{OFS="\t"}{print "mismatch\ttarget",\$2,\$3,\$1}' tmp.in_silico_targ.err
+if [ -s $DBCUT.outg.taxo ] ; then sed 's/^/in-silico\toutgroup\t/' tmp.in_silico_outg.stat ; fi
+if [ -s $DBCUT.outg.taxo ] && [ -z "$AVOID" ] ; then sed 's/^/in-silico\toutgroup clade\t/' tmp.in_silico_all_outg.stat ; fi
+if [ -s $DBCUT.outg.taxo ] ; then cat <(sed '/\t0\$/d;s/^/forward primer\toutgroup\t/' tmp.in_silico_outg.fwd.logo) <(sed '/\t0\$/d;s/^/reverse primer\toutgroup\t/' tmp.in_silico_outg.rvs.logo) ; fi
+if [ -s $DBCUT.outg.taxo ] ; then awk 'BEGIN{OFS="\t"}{print "mismatch\toutgroup",\$2,\$3,\$1}' tmp.in_silico_outg.err ; fi
+if [ -n "$CBG" ] ; then sed 's/^/barcoding gap\ttarget\t/' tmp.targ.intra_simil.stat ; fi
+if [ -n "$CBG" ] ; then echo -e "predicted barcoding gap\t$BG\nmean intra-genus distance\t$DG\nmean intra-specific distance\t$DS" | sed "s/^/barcoding gap\ttarget\t$TARG\t/" ; fi
+echo -e "barcode coverage\t$BCG\nbarcode specificity\t$BSG\nbarcode precision\t$BPG" | sed 's/\t/\tgenus\t/;s/^/index\ttarget\t/'
+echo -e "barcode coverage\t$BCT\nbarcode specificity\t$BST\nbarcode precision\t$BPT" | sed 's/\t/\tspecies\t/;s/^/index\ttarget\t/'
+EOF
+	eval bash ./make.df > ${INIT_DIR}/$LONGDF
+	fi
+else
+	echo "# No target sequences were amplified in-silico"
+fi
+
+finish $DEBUG

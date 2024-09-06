@@ -1,0 +1,268 @@
+#!/bin/bash
+
+# author: Guillaume Lentendu (guillaume.lentendu@unine.ch)
+
+# Usage info
+show_help() {
+cat << EOF
+
+NAME
+	Apolla - find probes in the nucleotide space
+	
+SYNOPSIS
+	Usage: ${0##*/} [ -bd ] [-c coverage] [-g gc_content_range] [-j cores] [-k kmer_coverage] [-l length] [-m outgroup_coverage] [-n outgroup_kmer_coverag] [-u taxonomic_level] [-v outgroup_taxonomic_level] [-w variant_count ] -i input_target -o input_outgroup
+
+DESCRIPTION
+	-h	display this help and exit
+	
+	-b	debug on, avoid deleting temporay directory
+	
+	-c COVERAGE
+		final minimum percent coverage of the target group (probe with wobble), default: 70
+	
+	-d	ensure a difference of at least 1-nt with the nearest outgroup kmer
+	
+	-g GC_CONTENT_RANGE
+		minimum and maximum GC content in the probe, default is 20-80
+
+	-i FILENAME
+		input fasta file for the target group in UTAX format
+		
+	-j CORES
+		number of CPU cores to use in parallel, default: 1
+
+	-k KMER_COVERAGE
+		kmer minimum percent coverage of target group, default: 2
+	
+	-l LENGTH
+		length of the probe, default: 20
+
+	-m OUTGROUP_COVERAGE
+		final maximum percent coverage of outgroups (probe with wobble), default: 0.5
+
+	-n OUTGROUP_KMER_COVERAGE
+		kmer maximum percent coverage of outgroup, default: 0.1
+
+	-o FILENAME
+		input fasta file for the outgroup in UTAX format
+	
+	-p PURINE_CONTENT_RANGE
+		minimum and maximum purine content in the probe, default is 0-100
+
+	-u LEVEL
+		taxonomic level for target group summary statistic, either a real number or the rank name, default: 6
+
+	-v OUTGROUP_LEVEL
+		taxonomic level for outgroup summary statistic, either a real number or the rank name, default: 4
+
+	-w VARIANT_COUNT
+		maximum number of variants of a single probe for all combinations of degenerated nucleotide, default: 50
+
+AUTHOR
+	Guillaume Lentendu
+
+COPYRIGHT
+	Copyright (C) 2021 Guillaume Lentendu
+
+EOF
+}
+
+error_help(){
+	echo "#Error: $1"
+	show_help | fmt -s -w $(tput cols)
+	exit 1
+} >&2
+
+finish(){
+	if [ "$1" -eq 0 ]
+	then
+		cd ..
+		rm -r apolla.$HASH $TEMPENV
+	else
+		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
+		ln -s $BTK/utils/load_env $PWD
+		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
+		>&2 echo "cd apolla.$HASH && source ./load_env"
+		rm $TEMPENV
+		cd ..
+	fi
+}
+
+# store initial environment
+TEMPENV=$(mktemp)
+(set -o posix; set > $TEMPENV)
+START_TIME=`date +%s`
+INIT_DIR=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+
+# Option's default value
+DEBUG=0
+MER=20
+COV=70
+GCMIN=20
+GCMAX=80
+KCOV=2
+MIS=0.5
+KMIS=0.1
+PMIN=0
+PMAX=100
+TARGLEV=6
+OUTGLEV=4
+NCPUS=1
+NWOB=50
+
+# get options
+while getopts ":bc:dg:hi:j:k:l:m:n:o:p:u:v:w:" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			exit 0;;
+		b)	DEBUG=1;;
+		c)	COV=${OPTARG};;
+		d)	DIFF=1;;
+		g)	[[ ${OPTARG} =~ ^[0-9]+-[0-9]+$ ]] || error_help " ${OPTARG} is not a range"
+			GCMIN=${OPTARG%-*}; GCMAX=${OPTARG#*-};;
+		i)	TARGF=$(readlink -e ${OPTARG});;
+		j)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			NCPUS=${OPTARG};;
+		k)	KCOV=${OPTARG};;
+		l)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			MER=${OPTARG};;
+		m)	MIS=${OPTARG};;
+		n)	KMIS=${OPTARG};;
+		o)	OUTGF=$(readlink -e ${OPTARG});;
+		p)	[[ ${OPTARG} =~ ^[0-9]+-[0-9]+$ ]] || error_help " ${OPTARG} is not a range"
+			PMIN=${OPTARG%-*}; PMAX=${OPTARG#*-};;
+		u)	TARGLEV=${OPTARG};;
+		v)	OUTGLEV=${OPTARG};;
+		w)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			NWOB=${OPTARG};;
+		\?)	error_help "# Invalid option: -${OPTARG}"
+			;;
+		:)	error_help "# Option -${OPTARG} requires an argument."
+			;;
+	esac
+done
+
+# check
+if [ -z "$TARGF" ]
+then
+	error_help "provide an input fasta file for the target group."
+	if [ ! -f "$TARGF" ]
+	then
+		error_help "the argument for the target input fasta file $TARGF is not a file."
+	fi
+elif [ -z "$OUTGF" ]
+then
+	error_help "provide an input fasta file for the outgroup."
+	if [ ! -f "$OUTGF" ]
+	then
+		error_help "the argument for the outgroup input fasta file $OUTGF is not a file."
+	fi
+fi
+
+# generate instance hash and working directory
+TEMP=$(mktemp)
+join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > $TEMP
+HASH=`cksum $TEMP | awk '{print $1}'`
+mkdir apolla.$HASH && cd apolla.$HASH
+mv $TEMP tmp_env
+
+# set generic variables
+TARG=$(basename ${TARGF%.*})
+TARGTOT=$( grep -c "^>" $TARGF)
+OUTG=$(basename ${OUTGF%.*})
+OUTGTOT=$( grep -c "^>" $OUTGF)
+COV=$(awk -v T=$TARGTOT -v C=$COV 'BEGIN{printf "%.0f", T*C/100+0.5}')
+KCOV=$(if [ -z ${KCOV} ] ; then echo 0 ; else awk -v T=$TARGTOT -v K=$KCOV 'BEGIN{printf "%.0f", T*K/100+0.5}' ; fi)
+MIS=$(awk -v O=$OUTGTOT -v M=$MIS 'BEGIN{printf "%.0f",O*M/100+0.5}' )
+KMIS=$(if [ -z ${KMIS} ] ; then echo $MIS ; else awk -v O=$OUTGTOT -v K=$KMIS 'BEGIN{printf "%.0f",O*K/100+0.5}' ; fi)
+if [[ $TARGLEV =~ ^[0-9]+$ ]]
+then
+	targtaxo () { sed -n '/>/s/.*tax=//p' | cut -d "," -f $TARGLEV | sort | uniq -c ; }
+else
+	targtaxo () { sed -n '/>/s/.*tax=/=/p' | grep -o "[=,]${TARGLEV}:[^,]*" | sed 's/^[=,]//' | sort | uniq -c ; }
+fi
+export -f targtaxo
+if [[ $OUTGLEV =~ ^[0-9]+$ ]]
+then
+	outgtaxo () { sed -n '/>/s/.*tax=//p' | cut -d "," -f $OUTGLEV | sort | uniq -c ; }
+else
+	outgtaxo () { sed -n '/>/s/.*tax=/=/p' | grep -o "[=,]${OUTGLEV}:[^,]*" | sed 's/^[=,]//' | sort | uniq -c ; }
+fi
+export -f outgtaxo
+
+# k-mer dictionaries
+jellyfish count -m $MER -t $NCPUS -o $TARG.${MER}mer_counts -s 100M $TARGF
+jellyfish count -m $MER -t $NCPUS -o $OUTG.${MER}mer_counts -s 100M $OUTGF
+
+# group specific k-mer
+#jellyfish query $TARG.${MER}mer_counts $(jellyfish query $OUTG.${MER}mer_counts $(jellyfish dump -L $KCOV -c $TARG.${MER}mer_counts | cut -d " " -f 1) | awk -v M=$KMIS '$2<=M{print $1}') | sort -k 2,2nr | awk '{print ">n"NR"_"$2"\n"$1}' > $TARG.${MER}mer.spec.fasta
+jellyfish dump -L $KCOV -c $TARG.${MER}mer_counts | sort -k 1,1 --parallel=$NCPUS | join -v 1 - <(jellyfish dump -L $KMIS -c $OUTG.${MER}mer_counts | sort -k 1,1 --parallel=$NCPUS) | sort -k 2,2nr | awk '{print ">n"NR"_"$2"\n"$1}' > $TARG.${MER}mer.spec.fasta
+
+# cluster k-mers
+swarm -t $NCPUS -d 1 -n -l $TARG.${MER}mer.swarm.log -o $TARG.${MER}mer.spec.swarm $TARG.${MER}mer.spec.fasta
+
+# coverage sort
+sed 's/_/ /g' $TARG.${MER}mer.spec.swarm | awk -v C=$COV '{s=0;for(i=2;i<=NF;i+=2){s+=$i};if(s>=C){printf "%s",s;for(i=1;i<=(NF-1);i+=2){printf " %s",$i};printf "\n"}}' | sort -k 1,1nr > $TARG.${MER}mer.spec.swarm.sum
+
+# force a difference of 1-nt with any outgroup k-mer
+if [ -n "$DIFF" ]
+then
+	jellyfish dump -L $KMIS -c $OUTG.${MER}mer_counts | awk '{print ">o"NR"_"$2"\n"$1}' | cat <(sed '/>/s/_/ /' $TARG.${MER}mer.spec.fasta | seqkit grep -f <(cut -d " " -f 2- $TARG.${MER}mer.spec.swarm.sum | tr " " "\n") | sed '/>/s/ /_/') - > targ_outg.fasta
+	swarm -t $NCPUS -d 1 -n -l targ_outg.swarm.log -o targ_outg.swarm targ_outg.fasta
+	grep "n" targ_outg.swarm | grep -v "o" > pure_targ.swarm
+	grep "n" targ_outg.swarm | grep "o" > mixed_targ_outg.swarm
+	awk -v M=$MIS '{out="";n=0;t=0;for(i=1;i<=NF;i++){split($i,a,"_"); if(a[1]~"^n"){n+=a[2];out=out" "a[1]"_"a[2]} else t+=a[2]};if(t<=M){sub("^  *","",out);print out}}' mixed_targ_outg.swarm > mixed_targ_outg.ok.swarm
+	if [ -s mixed_targ_outg.ok.swarm ]
+	then
+		grep -v -P $(cut -d " " -f 1 mixed_targ_outg.ok.swarm | tr "\n" "|" | sed 's/|$//') mixed_targ_outg.swarm > mixed_targ_outg.bad.swarm
+	else
+		cp mixed_targ_outg.swarm mixed_targ_outg.bad.swarm
+	fi
+	if [ -s mixed_targ_outg.bad.swarm ]
+	then
+		seqkit grep --quiet -f <(tr " " "\n" < mixed_targ_outg.bad.swarm) targ_outg.fasta | swarm -t $NCPUS -d 1 -n -l targ_with_outg.swarm.log -i targ_with_outg.internal -o targ_with_outg.swarm
+		seqkit grep --quiet -f <(tr " " "\n" < mixed_targ_outg.bad.swarm | grep -v "^o" | sed 's/_/ /' | sort -k 1,1 | join -v 1 - <(awk '{if($1~"^n" && $2~"^o"){print $1}; if($1~"^o" && $2~"^n"){print $2}}' targ_with_outg.internal | sort -u) | sed 's/ /_/') targ_outg.fasta | swarm -t $NCPUS -d 1 -n -l targ_without.swarm.log -o targ_without.swarm
+	else
+		touch targ_without.swarm
+	fi
+	cat pure_targ.swarm mixed_targ_outg.ok.swarm targ_without.swarm | sed 's/_/ /g' | awk -v C=$COV '{s=0;for(i=2;i<=NF;i+=2){s+=$i};if(s>=C){printf "%s",s;for(i=1;i<=(NF-1);i+=2){printf " %s",$i};printf "\n"}}' | sort -k 1,1nr > $TARG.${MER}mer.spec.swarm.sum
+fi
+
+# input taxonomic count
+export TARGLEV OUTGLEV
+cat $TARGF | targtaxo > $TARG.taxostat
+cat $OUTGF | outgtaxo > $OUTG.taxostat
+
+# wobble resolution, expand and check coverage
+wobble () {
+	if [ -z "$1" ] ; then read -a input ; else read -a input <<< "$@" ; fi
+	obsset=($(sed 's/_/ /' $TARG.${MER}mer.spec.fasta | seqkit grep --quiet -f <(echo ${input[@]:1} | tr " " "\n") | grep -v ">"))
+	obsoutg=$(jellyfish query $OUTG.${MER}mer_counts ${obsset[@]} | awk '{s+=$2}END{print s}')
+	cand=$(echo ${obsset[@]} | tr " " "\n" | sed 's/\(.\)/\1 /g' | awk -v M=$MER '{for(i=1;i<=M;i++){if(NR==1){a[i]=$i} else {if(a[i]!~$i){a[i]=a[i]" "$i}}}}END{for(i=1;i<=M;i++){split(a[i],b," ");asort(b);for(j=1;j<=length(b);j++){printf "%s",b[j]};printf "\n"}}' | nl | sort -k 2,2 | join -a 1 -1 2 -2 2 - <(sort -k 2,2 $BTK/utils/IUPAC.txt) | sort -k 2,2n | awk '{if(NF>2){printf "%s",$3} else printf "%s",$1}END{printf "\n"}')
+	[[ $(echo ${cand//[ATCG]/} | wc -m) -gt $(awk -v N=$NWOB 'BEGIN{printf "%.0f", log(N)/log(2)+0.5}') ]] && return # exit if too much degenerated positions (higher bound with only degenerated nt coding for two nt)
+	#eval echo $(echo $cand | sed 's/\(.\)/\1\n/g' | sed '$d' | nl | sort -k 2,2 | join -a 1 -1 2 - <(sort -k 1,1 $BTK/utils/IUPAC.txt) | awk '{if(NF==2){print} else print $3,$2}' | sort -k 2,2n | cut -d " " -f 1 | sed 's/\(.\)/\1,/g;s/,$//;/,/{s/^/{/;s/$/}/}' | awk '{printf $1}END{printf "\n"}') | awk '{for(i=1;i<=NF;i++){print ">w"i"\n"$i}}' > $cand.candset # brace expansion failed when too much variants
+	parallel -k 'echo -e ">w{#}\n{}"' ::: $(echo $cand | sed 's/\(.\)/\1\n/g' | sed '$d' | nl | sort -k 2,2 | join -a 1 -1 2 - <(sort -k 1,1 $BTK/utils/IUPAC.txt) | awk '{if(NF==2){print} else print $3,$2}' | sort -k 2,2n | cut -d " " -f 1 | sed 's/\(.\)/\1 /g' | awk 'BEGIN{p=0;s=0}{if(NF>1){if(s!=0){print s};s=0;print;p=0} else {if(p==0){s=$1;p=1} else {s=s$1}}}END{if(s!=0){print s}}' | tr "\n" ":" | sed 's/:$/\n/;s/:/ ::: /g') | sed 's/ //g' > $cand.candset
+	nbcand=$(sed -n '$=' $cand.candset)
+	if [ ${nbcand:-0} -gt $NWOB ] ; then rm $cand.candset && return ; fi # exit if too much wobble (exact)
+	candgc=$(awk '$1!~"^>"{gc=gensub("[AT]","","g",$1);len+=length(gc)/length($1);n+=1}END{print int(len/n*100+0.5)}' $cand.candset)
+	candpu=$(awk '$1!~"^>"{ag=gensub("[CT]","","g",$1);len+=length(ag)/length($1);n+=1}END{print int(len/n*100+0.5)}' $cand.candset)
+	outgcount=$(jellyfish query $OUTG.${MER}mer_counts -s $cand.candset | awk '{s+=$2}END{print s}')
+	targcount=$(jellyfish query $TARG.${MER}mer_counts -s $cand.candset | awk '{s+=$2}END{print s}')
+	rm $cand.candset
+	targtaxo=$(seqkit grep --quiet -j 1 -s -d -p $cand $TARGF | targtaxo | join -1 2 -2 2 -a 2 -o 0,1.1,2.1 -e 0 - $TARG.taxostat | sed 's/^,*[A-Za-z][A-Za-z]*://;s/ /:/;s/ /\//' | tr "\n" ";" | sed 's/;$//')
+	if [ $outgcount -gt 0 ]
+	then
+		outgtaxo=$(seqkit grep --quiet -j 1 -s -d -p $cand $OUTGF | outgtaxo | join -1 2 -2 2 - $OUTG.taxostat | sed 's/^,*[A-Za-z][A-Za-z]*://;s/ /:/;s/ /\//' | tr "\n" ";" | sed 's/;$//')
+	else
+		outgtaxo=NA
+	fi
+	echo "$cand ${#obsset[0]} $candgc $candpu ${#obsset[@]} ${nbcand:-0} ${input[0]}_($((${input[0]}*100/$TARGTOT))) ${targcount}_($(($targcount*100/$TARGTOT))) ${obsoutg}_($(awk -v O=$obsoutg -v T=$OUTGTOT 'BEGIN{printf "%.1f",O/T*100}')) ${outgcount}_($(awk -v O=$outgcount -v T=$OUTGTOT 'BEGIN{printf "%.1f",O/T*100}')) $targtaxo $outgtaxo"
+}
+export -f wobble
+export MER TARGF OUTGF TARG OUTG TARGTOT OUTGTOT BTK NWOB
+parallel -a $TARG.${MER}mer.spec.swarm.sum -k -j $NCPUS wobble | sort -k 8,8nr -k 10,10n -k 6,6n -k 5,5n | cat <(echo "candidate length GC_content purine_content target_variants total_variants target_kmer_matches target_coverage outgroup_kmer_matches outgroup_coverage target_taxonomy outgroup_taxonomy") - | tr " " "\t" | sed 's/_/ /g' | awk -v M=$MIS -v GCMIN=$GCMIN -v GCMAX=$GCMAX -v PMIN=$PMIN -v PMAX=$PMAX 'NR==1 || ($3>=GCMIN && $3<=GCMAX && $4>=PMIN && $4<=PMAX && $13<=M){print}'
+
+# end 
+finish $DEBUG

@@ -1,0 +1,306 @@
+#!/bin/bash
+
+# author: Guillaume Lentendu (guillaume.lentendu@unine.ch)
+
+# Usage info
+show_help() {
+cat << EOF
+BLASTN with consensus taxonomy across a range of bit score.
+The range increases inversely proportionnaly to the highest identity value (e.g. 100% = low range; 90% = medium range; 80 % = large range).
+
+Author
+	Guillaume Lentendu <guillaume.lentendu@unine.ch>
+
+Usage
+	$0 [-hekr] [-a ALGORITHM] [-b BLAST_HIT_TABLE] [-c COVERAGE] [-d DB] [-f FILENAME] [-i ID] [-n NCPUS] [-o OUTPUT] [-q "QUERY"] [-s SENSITIVITY] [-t TARGET] [-x TAXDUMP] fasta
+
+Options
+	-h	show this help
+	
+	-a ALGORITHM
+		blastn algorithm among blastn, blastn-short, dc-megablast, megablast and rmblastn; default: megablast
+	
+	-b BLAST_HIT_TABLE
+		provide online blast "Hit Table(csv)" to find consensus, thus avoid re-running blast ; off by default
+	
+	-c COVERAGE
+		minimum percent coverage of query sequence; default: 60
+	
+	-d DB
+		genbank database to blast against; for local database, provide full path to database prefix (e.g. $HOME/databases/nt), otherwise perform remote blastn ; default: nt
+	
+	-e	exclude environmental sequences from blast search
+	
+	-f FILENAME
+		provide full blast table created with option -o to find consensus with different parameters, thus avoid re-running blast; off by default
+	
+	-i ID
+		minimum percent identity; default: 80
+	
+	-k	keep temporary directory for debugging; off by default
+	
+	-n NCPUS
+		number of CPUs to run in parallel; default: 1
+	
+	-o OUTPUT
+		output full blast table of best hits; off by default
+	
+	-q "QUERY"
+		genbank query to constrain the set of sequences to perform remote blastn against (e.g. "Opisthokonta[Organism] AND 28S AND 1000:500000[Sequence Length]"); for local database, only work with database from blastn ftp repository and only accept organism names; default: "Eukaryota[Organism] AND 500:500000000[Sequence Length]"
+	
+	-s SENSITIVITY
+		consensus sensitivity, percentage range of bit-score ponderate by query length to keep sequence for consensus taxonomy construction; default: 95
+	
+	-t TARGET
+		maximum number of target sequences to keep for consensus; default: 10
+	
+	-v 	invert QUERY, for excluding taxa from local blastn; off by default
+	
+	-x TAXDUMP
+		full path to taxdump with, e.g., own taxid for local database; default use first 'taxdump' directory in database directory, or TAXONKIT_DB variable
+		
+Tips
+	Highest speed is achieve with a local database, with which blastn search can be done in parallel.
+	
+	NCBI databases can be downloaded at https://ftp.ncbi.nlm.nih.gov/blast/db/
+	
+	Other reference databases (e.g UNITE, SILVA, PR2, MIDORI, BOLD, own sequences, ...) can be used, but they need to be formated with makeblastdb and a custom taxdump have to be build with taxonkit (but see https://bioinf.shenwei.me/taxonkit/usage/#create-taxdump).
+	
+	For remote blastn, using the query option will reduce computation time, e.g. by selecting the target organism(s) (add Fungi to control for contaminants), the target gene and sequence length range.
+	Option -e will also reduce the set of target sequences, thus the computation time.
+	
+	For local blastn, use the query to restrict the search to certain organisms, or use the combination of -q and -v option to remove taxa from search (e.g. -q "unclassified Fungi OR unclassified Eukaryota" -v).
+	Option -e will remove "environmental samples" of the matched clades by the query, if any.
+
+EOF
+}
+
+failed_help() {
+	echo -e "$1\n"
+	finish $KEEP
+	exit 1
+} >&2
+
+error_help() {
+	echo -e "#Error: $1\n"
+	show_help | fmt -s -w $(tput cols)
+	finish $KEEP
+	exit 1
+} >&2
+
+finish(){
+	if [ "$1" -eq 0 ]
+	then
+		cd $EXEC
+		rm -rf $TEMP $TEMPENV
+	else
+		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
+		ln -s $BTK/utils/load_env $PWD
+		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
+		>&2 echo "cd $TEMP && source ./load_env"
+		rm $TEMPENV
+	fi
+}
+
+# store initial environment
+TEMPENV=$(mktemp --suffix=cons -p $PWD)
+(set -o posix; set > $TEMPENV)
+EXEC=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+
+# Option's default value
+ALG=megablast
+QCOV=60
+DB=nt
+ID=80
+NCPUS=1
+SEN=95
+NTARG=10
+KEEP=0
+
+# get options
+while getopts ":ha:b:c:d:ef:i:kn:o:q:s:t:vx:" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			finish 0
+			exit 0;;
+		a)	ALG=${OPTARG};;
+		b)	BLAST=$(readlink -f ${OPTARG});;
+		c)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 10")" )) && (( "$(bc <<<"${OPTARG} <= 100")" )); then QCOV=${OPTARG} ; else error_help "value provided to option -c should be a number between 10 and 100, not ${OPTARG}" ; fi ;;
+		d)	DB="${OPTARG}" ; if [[ ${DB} == *"/"* ]] ; then if [ ! -d "${DB%/*}" ] ; then error_help "the directory (${DB%/*}) in the path to the database provided to -d option does not exist" ; elif [ ! -f "${DB}.ndb" ] ; then error_help "there is no database with prefix ${DB##*/} in the directory ${DB%/*}" ; fi ; else REMOTE=T ; fi ;;
+		e)	EX=" NOT(((environmental samples[organism] OR metagenomes[orgn] OR txid32644[orgn]) AND 1[PCNT]) OR env [DIV])";;
+		f)	FILE=$(readlink -f ${OPTARG});;
+		i)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 50")" )) && (( "$(bc <<<"${OPTARG} <= 100")" )); then ID=${OPTARG} ; else error_help "value provided to option -i should be a number between 50 and 100, not ${OPTARG}" ; fi ;;
+		k)	KEEP=1;;
+		n)	NCPUS="${OPTARG}";;
+		o)	OUT=$(readlink -f ${OPTARG});;
+		q)	QUERY="${OPTARG}";;
+		s)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} >= 50")" )) && (( "$(bc <<<"${OPTARG} <= 100")" )); then SEN=${OPTARG} ; else error_help "value provided to option -s should be a number between 50 and 100, not ${OPTARG}" ; fi ;;
+		t)	NTARG=${OPTARG};;
+		v)	REV=1;;
+		x)	if [ ! -d "${OPTARG}" ] ; then error_help "the taxdump directory ${OPTARG} does not exist" ; else TDB="${OPTARG}" ; fi;;
+		\?)	error_help "# Invalid option: -${OPTARG}";;
+		:)	error_help "# Option -${OPTARG} requires an argument.";;
+	esac
+done
+shift "$((OPTIND-1))" # Shift off the options and optional --
+
+# store input filename
+if [ -z "$FILE" ]
+then
+	if [ -z "$1" ]
+	then 
+		error_help "input fasta file is missing."
+	elif [ ! -f $1 ]
+	then
+		error_help "input fasta file $1 not found. Check filename and path and try again ;)"
+	else
+		IN=$(readlink -f $1) ; shift
+		seqkit seq -v $IN > /dev/null
+		if [ $? -gt 0 ]
+		then
+			error_help "input file is not in fasta format"
+		fi
+	fi
+fi
+
+# taxdump
+if [ -z "$TDB" ] && [ -z "$FILE" ]
+then
+	if [ -d "${DB%/*}/taxdump" ]
+	then
+		TDB="${DB%/*}/taxdump"
+	elif [ ! -z "$TAXONKIT_DB" ]
+	then
+		TDB="$TAXONKIT_DB"
+	else
+		error_help "need to set TAXONKIT_DB variable or to provide a value to -x option to properly use taxonkit" 
+	fi
+fi
+
+## blast and purge contaminants ##
+# megablast with BLAST+ tools
+TEMP=$(mktemp -d -p $PWD)
+cd $TEMP
+if [ -z "$FILE" ]
+then
+	seqkit seq -g $IN > ${IN##*/}
+	IN=${IN##*/}
+	NBS=$(seqkit stat -T $IN | awk 'NR==2{print $4}')
+	if [ $NBS -le 10 ] ; then NCPUS=1 ; elif [ $NCPUS -gt $NBS ] ; then NCPUS=$NBS ; fi # cap nb of CPUS to 1 if less than 10 sequences or to nb of sequences if fewer sequences than nb CPUS
+	if [ -z "$BLAST" ]
+	then
+		if [ -z "$REMOTE" ]
+		then
+			# local blastn: provide one block of sequence at a time to blastn and parallelize, much faster than using blastn --num_threads
+			if [ -z "$QUERY" ]
+			then
+				cat $IN | parallel -j $NCPUS --recstart '>' --pipe -n $(((NBS+NCPUS-1)/NCPUS)) blastn -task $ALG -db $DB -perc_identity $ID -qcov_hsp_perc $QCOV -max_target_seqs $NTARG -max_hsps 1 -outfmt \'"6 qseqid saccver staxid pident length qlen qcovhsp evalue bitscore"\' > blast.tsv
+			else
+				# species taxid of target clades from query --> taxidlist not working properly with blastn --> issue with blast database format, need a JSON metadata file .njs listing database files
+				QUERYO=$(echo $QUERY | tr " " "\n" | sed -n 's/\(.*\)\[Organism\]/\1/p' | tr "\n" " ")
+				echo $QUERYO | tr " " "\n" | taxonkit name2taxid --data-dir $TDB | cut -f 2 > taxid
+				if [ -s taxid ]
+				then
+					TAXID=$(tr "\n" "," < taxid | sed 's/,$//')
+					taxonkit list --data-dir $TDB -r -I "" -i $TAXID | awk '$2=="[species]"{print $1}' > taxidlist
+				else
+					error_help "no taxid found for the organisms $QUERYO in the taxdump $TBD (query = $QUERY )."
+				fi
+				#for i in $QUERYO ; do esearch -db taxonomy -query $i | efetch -format docsum | xtract -pattern DocumentSummary -element TaxId ; done > taxid # too long!!! use taxonkit instead
+				#parallel -j $NCPUS -a taxid get_species_taxids.sh -t {} > taxidlist
+				if [ ! -z "$EX" ]
+				then
+					if [ "$REV" ]
+					then
+						# for reverse query, add environmental samples taxid in descendaent of the first parent of the matched taxid to the taxidlist
+						for i in $(efetch -input taxid -db taxonomy -format xml | xtract -pattern Taxon -block LineageEx -element ScientificName | awk '{print $NF"[NextLevel]"}') ; do esearch -db taxonomy -query $i | efetch -format docsum | xtract -pattern DocumentSummary -if ScientificName -equals "environmental samples" -element TaxId ; done > taxid2
+						if [ -s taxid2 ]
+						then
+							taxonkit list --data-dir $TDB -r -I "" -i $(tr "\n" "," < taxid2 | sed 's/,$//') | awk '$2=="[species]"{print $1}' >> taxidlist
+						fi
+						#parallel -j $NCPUS -a taxid2 get_species_taxids.sh -t {} >> taxidlist
+					else
+						# for direct query, remove environmental samples taxid of direct descendant of matched taxid from the taxidlist
+						for i in $(cat taxid); do j=$(taxonkit list -n -r --data-dir $TDB -i $i | awk '$0~"environmental"{print $1}' | tr "\n" "," | sed 's/,$//') ; if [ ! -z "$j" ] ; then taxonkit list -r --data-dir $TDB -i $j | awk '$2=="[species]"{print $1}' ; fi ; done > ex_taxid
+						#for i in $(efetch -input taxid -db taxonomy -format docsum | xtract -pattern DocumentSummary -element ScientificName | sed 's/$/[NextLevel]/') ; do esearch -db taxonomy -query "$i" | efetch -format docsum | xtract -pattern DocumentSummary -if ScientificName -equals "environmental samples" -element TaxId ; done > ex_taxid
+						sort taxidlist | join -v 1 - <(sort ex_taxid) > tmp && mv tmp taxidlist
+					fi
+				fi
+				if [ "$REV" ]
+				then
+					cat $IN | parallel -j $NCPUS --recstart '>' --pipe -n $(((NBS+NCPUS-1)/NCPUS)) blastn -task $ALG -db $DB -negative_taxidlist taxidlist -perc_identity $ID -qcov_hsp_perc $QCOV -max_target_seqs $NTARG -max_hsps 1 -outfmt \'"6 qseqid saccver staxid pident length qlen qcovhsp evalue bitscore"\' > blast.tsv
+				else
+					cat $IN | parallel -j $NCPUS --recstart '>' --pipe -n $(((NBS+NCPUS-1)/NCPUS)) blastn -task $ALG -db $DB -taxidlist taxidlist -perc_identity $ID -qcov_hsp_perc $QCOV -max_target_seqs $NTARG -max_hsps 1 -outfmt \'"6 qseqid saccver staxid pident length qlen qcovhsp evalue bitscore"\' > blast.tsv
+				fi
+			fi
+		else
+			if [ -z "$QUERY" ]
+			then
+				QUERY="Eukaryota[Organism] AND 500:500000000[Sequence Length]"
+			fi
+			# estimate result size
+			BIT=$(awk '$1~">"{sub(">","");print $1}' $IN | wc | awk -v n=$NTARG '{print $1*50*n+$3*n}')
+			# remote blastn
+			blastn -task $ALG -remote -db $DB -query $IN -out blast.tsv -entrez_query "$QUERY$EX" -perc_identity $ID -qcov_hsp_perc $QCOV -max_target_seqs $NTARG -max_hsps 1 -outfmt "6 qseqid saccver staxid pident length qlen qcovhsp evalue bitscore" &
+			BPID=$!
+			# progress bar
+			>&2 echo "blastn progress:"
+			pv -s $BIT -d ${BPID}:$(lsof -w -p $BPID | grep "/blast.tsv$" | awk '{print $4}' | sed 's/[a-z]*$//') -pteb
+			wait -n $BPID
+		fi
+		if [ ! -s blast.tsv ]
+		then
+			failed_help "blastn found no match for $IN. Try again with a different query, or with reduced minimum similarity or minimum coverage."
+		fi
+	else
+		# from online blast, subset best hits and convert to same format by retrieving staxid, qlen and computing qcov
+		if [ ! -f "$BLAST" ]
+		then
+			cd .. && rm -rf $TEMP
+			error_help "input blast Hit Table file $BLAST not found (option -b). Check filename and path and try again ;)"
+		else
+			# standard columns are: qaccver saccver pident length mismatch gapopen qstart qend sstart send evalue bitscore
+			awk -F"," -v n=$NTARG '{if(NR==1){p=$1;c=1;print} else {if($1==p){if(c<n){c+=1;print}} else {p=$1;c=1;print}}}' $BLAST | sed '/^$/d' > tmp.blast.tsv
+			cut -d "," -f 2 tmp.blast.tsv | sed 's/\..*//' | sort -u | efetch -db nuccore -format docsum | xtract -pattern DocumentSummary -element Caption,TaxId > taxid
+			tr "," " " < tmp.blast.tsv | awk '{sub(".[^.]*$","",$2);print}' | sort -k 2,2 | join -1 2 - taxid | sort -k 2,2 -k 12,12nr | join -1 2 - <(seqkit seq -w0 $IN | awk '{if($1~"^>"){sub(">","",$1);printf "%s\t",$1} else printf "%s\n", length($1)}') | awk '{print $1,$2,$13,$3,$4,$14,($8-$7+1)/$14*100,$11,$12}' | tr " " "\t" > blast.tsv
+		fi
+	fi
+	# get taxop, remove coverage below 60%, keep best hsp from same subject
+	HEADER="query subject_accession identity alignment_length query_length query_coverage evalue bitscore subject_taxonomy"
+	if [ -z "$TAXONKIT_DB" ]
+	then
+		cut -f 3 blast.tsv | sort -u | efetch -db taxonomy -format xml | xtract -pattern Taxon -element TaxId,ScientificName -block "*/Taxon" -tab "|" -element ScientificName | sort -k 1,1 -t $'\t' | sed 's/|unclassified[^|]*$//;s/[^\t|]*|//;s/ /_/g' | awk '{print $1"\t"$3"|"$2}' | join -t $'\t' -1 3 <(sort -k 3,3 -t $'\t' blast.tsv) - | cut -f 2- | sort -t $'\t' -k 1,1 -k 2,2 -k 3,3nr | awk -F'\t' -v Q=$QCOV 'BEGIN{FS=OFS="\t"}{if($6<Q || ($1==q && $2==s)){next};q=$1;s=$2;sub(".*",sprintf("%.2f",$3),$3);sub(".*",sprintf("%.2f",$6),$6); print}' | sort -t $'\t' -k 1,1 -k 3,3nr | cat <(echo $HEADER | tr " " "\t") - > blast.taxo.tsv
+	else
+		cut -f 3 blast.tsv | sort -u | taxonkit lineage --data-dir $TDB -d "|" | sort -k 1,1 -t $'\t' | sed 's/|unclassified[^|]*$//;s/ /_/g' | join -t $'\t' -1 3 <(sort -k 3,3 -t $'\t' blast.tsv) - | cut -f 2- | sort -t $'\t' -k 1,1 -k 2,2 -k 3,3nr | awk -F'\t' -v Q=$QCOV 'BEGIN{FS=OFS="\t"}{if($6<Q || ($1==q && $2==s)){next};q=$1;s=$2;sub(".*",sprintf("%.2f",$3),$3);sub(".*",sprintf("%.2f",$6),$6); print}' | sort -t $'\t' -k 1,1 -k 3,3nr | cat <(echo $HEADER | tr " " "\t") - > blast.taxo.tsv
+	fi
+	if [ ! -z $OUT ]
+	then
+		cp blast.taxo.tsv $OUT
+	fi
+elif [ ! -z "$FILE" ]
+then
+	if [ ! -f "$FILE" ]
+	then
+		cd .. && rm -rf $TEMP
+		error_help "input full blast table file $FILE not found (option -f). Check filename and path and try again ;)"
+	else
+		ln -s $FILE blast.taxo.tsv
+	fi
+fi
+
+
+# keep only best hits within a range of bit score:
+# by query sequence (parallel)
+# then compute MS = bit score / query length + (100-max(identity))/10
+# keep if MS >= max(MS) x $SEN / 100
+consensus () {
+	sort -k 2,2 -k 8,8nr | awk '{ms=$8/$5; if($3>M){M=$3};a[NR]=$0"\t"ms}END{for(i=1;i<=FNR;i++){split(a[i],b," ");print a[i]"\t"b[10]+(100-M)/10}}' | awk -v S=$SEN '{if($10>M){M=$10};a[NR]=$0}END{for(i=1;i<=FNR;i++){split(a[i],b," ");if(b[10] >= M*S/100){print a[i]}}}' | awk 'BEGIN{FS=OFS="\t"}{if(NR==1){su=$1; re=$2; sm=$3; sM=$3; cm=$6; cM=$6; t=$9; L=split($9,a,"|"); for(i=1;i<=L;i++){all[NR,i]=a[i]}} else {re=re","$2;  if($3<sm){sm=$3};if($3>sM){sM=$3};if($6<cm){cm=$6};if($6>cM){cM=$6}; l=split($9,a,"|"); for(i=1;i<=l;i++){all[NR,i]=a[i]}}}END{if(FNR==1){print su,sm,cm,t,re} else {t=all[1,1]; e=0; for(i=2;i<=L;i++){f=all[1,i];for(j=2;j<=FNR;j++){if(all[j,i]!=f){e=1; break}}; if(e==1){break}; t=t"|"f}; print su,sm"-"sM,cm"-"cM,t,re}}'
+}
+export -f consensus
+export SEN
+HEAD="query identity coverage consensus_taxonomy subject_accession"
+sed '1d' blast.taxo.tsv | awk '$1 != p{printf ">"}{p=$1}1' | parallel -j $NCPUS --pipe -kN1 --recstart ">" --rrs consensus | cat <(echo $HEAD | tr " " "\t") -
+
+finish $KEEP

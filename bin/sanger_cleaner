@@ -1,0 +1,555 @@
+#!/bin/bash
+
+# author: Guillaume Lentendu (guillaume.lentendu@unine.ch)
+
+# Usage info
+show_help() {
+cat << EOF
+This is sanger cleaner v0.1
+
+Author
+	Guillaume Lentendu <guillaume.lentendu@unine.ch>
+
+Description
+	sanger cleaner perform basecalling, eventually (pair-end) assembly, quality trimming and primer removal of Sanger sequences.
+
+Usage
+	$0 [-hbfq] [-a align] [-c 'consensus_blast_parameter'] [-d db] [-e error] [-p peak] [-t trim] -r directory -o output_directory input_table
+
+Options
+	-h	show this help
+	
+	-a ALIGN
+		alignment options, either DEFAULT for default alignment parameters for tracy (-g -10 -e -4 -m 3 -n -5) or RELAX for relaxed alignment parameters (-g -2 -e -1 -m 3 -n -2); default is DEFAULT
+	
+	-b debug on, avoid deleting temporay directory
+	
+	-c consensus_blast_PARAMETER
+		single-quoted list of parameters for the consensus blast; clade from the input table can be used to build the query, and is accessed with %c, for example, '-e -q "%c[Organism]"'; off by default (i.e., use consensus_blast default parameters)
+	
+	-d DB
+		genbank database to blast against; for local database, provide full path to database prefix (e.g. $HOME/databases/nt), otherwise perform remote blastn ; this will perform consensus_blast per clade and gene;  consensus_blast default parameters can be changed with option -c; default: nt
+	
+	-e ERROR
+		error rate for cutadapt amount of mismatch(es) allowed to detect and remove primers; default: 0.2
+	
+	-f	force using only samples contains in the input file; default: off, all ab1 files in the input directory have to be in the input file
+	
+	-j	when no reference sequences are provided, fetch genbank sequences for the clade and target gene, cut them with primers, and if any sequences could be cut with both primers, use them as reference to extract the amplified part of the sequences (i.e. removing primers and flanking regions)
+	
+	-l MAX
+		maximum expected length of amplified sequences; default: 1500
+	
+	-m MIN
+		minimum raw sequence length to process sequence; default: 10
+	
+	-n NCPUS
+		number of CPUs to run in parallel; default: 1
+	
+	-o OUTPUT
+		output directory suffix for cleaned and assembled sequences; mandatory
+	
+	-p PEAK
+		tracy peak ratio to call base; default: 0.5
+	
+	-q	output (unpaired) cleaned fastq sequences too (Phred score from 0 to 60, ASCII +33); default off
+		
+	-r RAW_DIRECTORY
+		path to directory containing raw ab1 files
+	
+	-t TRIM
+		sickle quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect base allowed) ; default: 30
+
+Input table
+	The input table describing a full or partial 96-well plate have to be TAB-separated and have to contain the following columns (in any order):
+	project, cell, sample, primer_name, primer_sequence, reverse_primer_name, reverse_primer_sequence, sequence_direction, organism, clade, gene
+	
+	Optional column:
+	reference_sequence_file
+	
+	Columns description:
+	
+	"project" is used to perform separate analyses and to group output sequences.
+	
+	"sequence_direction" allow to orientate sequences and assemble paired sequences correctly. It is either "forward" when the primer described by "primer_name" is a the 5'-end of the biological sequence, or "reverse" when the primer described by "primer_name" is a the 3'-end of the biological sequence.
+	
+	"cell" is for the original cell position on the 96-well plate or the sample code which have to be present in a single ab1 filename of the input directory (e.g. "A01" for filename "1F9BSAA000_A01_premix.ab1", or "THR-67" for filename "THR-67_BO240330F_F_LCO_Rawdata.ab1").
+	
+	"sample" value is used to eventually group sequences with same sample name. Two sequences with the same "sample" value will be assemble using "tracy consensus". This tool does not support assembly of more than two raw sequences, which would need to be assembled in other downstream analyses.
+	
+	"primer_name" and "primer_sequence" contain the primer name and 5'-3' sequence used for sequencing and located toward the 5'-end in the raw sequence.
+	
+	"reverse_primer_name" and "reverse_primer_sequence" contain the primer name and 5'-3' sequence located toward the 3'-end in the raw sequence.
+	
+	"organism" is used for output sequence annotation, optionally to select a reference sequence.
+	
+	"clade" is used to perform separate analyses, to group output sequences, to annotate sequences and, optionally, to select a reference sequence.
+	
+	"gene" is used to perform separate analyses, to group output sequences and to annotate sequences. If multiple sequences have the same "project", "sample" and "gene" values, they will be assemble together.
+	
+	"reference_sequence_file" may contain the file path to fasta formatted sequence file(s) used to extract the amplified sequence with HMMER (i.e. removing primers and flanking regions). If multiple fasta sequences, the definition line will be searched for the first sequence matching the "organism", and, if not found, the "clade". The reference sequences are expected to be forward orientated.
+
+EOF
+}
+
+error_help() {
+	echo -e "#Error: $1\n"
+	show_help | fmt -s -w $(tput cols)
+	finish $DEBUG
+	END_TIME=$(date +%s)
+	DIFFT=$(date -d@$(echo "$END_TIME - $START_TIME + 59" | bc) -u "+%M") # only delete output directory if produced during the minute the script start
+	if [ -d "sanger_cleaner.$OUTPUT" ] && [ ! -z $(find . -type d -name "sanger_cleaner.$OUTPUT" -mmin -$DIFFT) ] ; then rm -r sanger_cleaner.$OUTPUT ; fi
+	exit 1
+} >&2
+
+finish(){
+	if [ "$1" -eq 0 ]
+	then
+		cd $EXEC
+		rm -rf $TMP $TEMPENV
+	else
+		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
+		ln -s $BTK/utils/load_env $PWD
+		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
+		>&2 echo "cd $TMP && source ./load_env"
+		rm $TEMPENV
+	fi
+}
+
+# store initial environment
+TEMPENV=$(mktemp)
+(set -o posix; set > $TEMPENV)
+START_TIME=`date +%s`
+EXEC=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+
+# Option's default value
+ALIGN="-g -10 -e -4 -m 3 -n -5"
+ERR=0.2
+FORCE=F
+MAXLA=1500
+MINLR=10
+PEAK=0.5
+TRIM=30
+DEBUG=0
+NCPUS=1
+
+# get options
+while getopts ":a:bc:d:e:fhjl:m:n:o:p:qr:t:" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			exit 0;;
+		a)	if [ "${OPTARG}" == "RELAX" ]
+			then
+				ALIGN="-g -2 -e -1 -m 3 -n -2"
+			elif [ "${OPTARG}" != "DEFAULT" ]
+			then
+				error_help "wrong parameter for option -a"
+			fi ;;
+		b)	DEBUG=1;;
+		c)	CONSP="${OPTARG}";;
+		d)	DB="${OPTARG}"
+			if [[ ${DB} =~ ^*/*$ ]]
+			then
+				if [ ! -d "${DB%/*}" ]
+				then 
+					error_help "the directory (${DB%/*}) in the path to the database provided to -d option does not exist"
+				elif [ ! -f "${DB}.ndb" ]
+				then
+					error_help "there is no blast database with prefix ${DB##*/} in the directory ${DB%/*}"
+				fi
+			fi ;;
+		e)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 0")" )) && (( "$(bc <<<"${OPTARG} < 1")" ))
+			then
+				ERR=${OPTARG}
+			else
+				error_help "value provided to option -e should be a float number between 0 and 1, not ${OPTARG}"
+			fi ;;
+		f)	FORCE=T;;
+		j)	DJIIN=T;;
+		l)	MAXLA="${OPTARG}";;
+		m)	MINLR="${OPTARG}";;
+		n)	NCPUS="${OPTARG}";;
+		o)	OUTPUT=${OPTARG};;
+		p)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 0")" )) && (( "$(bc <<<"${OPTARG} < 1")" ))
+			then
+				PEAK=${OPTARG}
+			else
+				error_help "value provided to option -p should be a float number between 0 and 1, not ${OPTARG}"
+			fi ;;
+		q)	FASTQ=1;;
+		r)	if [ -d ${OPTARG} ]
+			then
+				DIR=$(readlink -f ${OPTARG} )
+			else
+				error_help "# Directory for option -d not found: ${OPTARG}"
+			fi;;
+		t)	TRIM=${OPTARG};;
+		\?)	error_help "# Invalid option: -${OPTARG}";;
+		:)	error_help "# Option -${OPTARG} requires an argument.";;
+	esac
+done
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
+
+# store input filename
+if [ -z "$1" ]
+then 
+	error_help "the configuration file is missing."
+elif [ ! -f $1 ]
+then
+	error_help "configuration file $1 not found. Check filename and path and try again ;)"
+else
+	METAD=$(readlink -f $1) ; shift
+fi
+
+# control mandatory parameters (input directory and output files)
+if [ -z "$DIR" ]
+then
+	error_help "please provide the path of the directory containing raw ab1 files."
+fi
+if [ ! -d "$DIR" ]
+then
+	error_help "$DIR is not a directory"
+fi
+if [ -z "$OUTPUT" ]
+then
+	error_help "please provide a value to option -o."
+elif [ -d "sanger_cleaner.$OUTPUT" ]
+then
+	error_help "output directory sanger_cleaner.$OUTPUT already exist"
+fi
+
+# working directory
+mkdir sanger_cleaner.$OUTPUT
+TMP=$(mktemp -d -p $PWD)
+cd $TMP
+
+# control mandatory header and assign values to variables
+HEAD=(project cell sample primer_name primer_sequence reverse_primer_name reverse_primer_sequence sequence_direction organism clade gene)
+VARS=(PROJ CELL SAM PRIM PRIMSEQ REV REVSEQ SEQDIR ORGA CLADE GENE)
+HEADIN=($(head -1 $METAD))
+DIFFHEAD=$(echo ${HEAD[@]} | tr " " "\n" | sort | join -v 1 - <(echo ${HEADIN[@]} | tr " " "\n" | sort))
+if [ ! -z "$DIFFHEAD" ]
+then
+	error_help "the input file is missing the following column(s): $DIFFHEAD"
+fi
+for i in $(seq 0 $((${#VARS[@]}-1)))
+do
+	IFS=$'\t' read -r -a ${VARS[$i]} <<< $(cut -f $(head -1 $METAD | tr "\t" "\n" | awk -v H=${HEAD[$i]} '$1==H{print NR}') $METAD | sed '1d' | tr "\n" "\t" | sed 's/\t$//;s/ /_/g')
+done
+
+# optionnal column
+if [[ "${HEADIN[@]}" == *"reference_sequence_file"* ]]
+then
+	declare -A REF
+	while read pos file
+	do
+		if [ -z "$file" ]
+		then
+			REF[$pos]=""
+		elif [[ "$file" == "/"* ]]
+		then
+			REF[$pos]="$(readlink -f $file)"
+		else
+			REF[$pos]="$(readlink -f $EXEC/$file)"
+		fi
+	done < <(cut -f $(head -1 $METAD | tr "\t" "\n" | awk '$1=="reference_sequence_file"{print NR}') $METAD | awk 'NR>1{print NR-2,$0}')
+fi
+
+# control number of files and cell names
+AB=($(ls $DIR/*ab1 | sed 's|.*/||'))
+#PAB=$(echo ${AB[@]} | tr " " "\n" | sed -e '1{h;d;}' -e 'G;s,\(.*\).*\n\1.*,\1,;h;$!d')
+#SAB=$(echo ${AB[@]} | tr " " "\n" | rev | sed -e '1{h;d;}' -e 'G;s,\(.*\).*\n\1.*,\1,;h;$!d' | rev)
+#if [ -z $PAB ]
+#then
+	#error_help "there is more than one prefix to AB1 files. The ab1 files in the input directory are expected to have all the same prefix."
+#fi
+
+if [ $FORCE == "F" ]
+then
+	#diff <(echo ${AB[@]} | sed -r 's/[^ ]*_([A-Z][0-9][0-9])_[^ ]*/\1/g' | tr " " "\n") <(echo ${CELL[@]} | tr " " "\n") > cellmatch
+	for i in ${CELL[@]}; do echo ${AB[@]} | tr " " "\n" | grep -c $i ; done | awk '{s+=$1}END{print s}' > cellmatch
+	if [ ${#CELL[@]} -ne ${#AB[@]} ]
+	then
+		error_help "Not the same number of ab1 file in the sequence directory (${#AB[@]}) and cells in the input table (${#CELL[@]})"
+	elif [ $(cat cellmatch) -ne ${#AB[@]} ]
+	then
+		error_help "Not all cell names could be found in ab1 filenames ( $(cat cellmatch) cell names found out of ${#CELL[@]} )"
+	fi
+fi
+
+# reassign AB to only the needed ab1 files, or correct the order
+declare -a ABOK
+for i in ${CELL[@]}
+do
+	MATCH=$(echo ${AB[@]} | tr " " "\n" | grep $i)
+	if [ ${#MATCH[@]} -eq 0 ]
+	then
+		error_help "ab1 file missing for cell $i"
+	elif [ ${#MATCH[@]} -lt 1 ]
+	then
+		error_help "more than one ab1 file found for cell $i : $MATCH" 
+	fi
+	
+	ABOK+=( $MATCH )
+done
+unset AB
+AB=(${ABOK[@]})
+
+# now work by project, gene and clade
+declare -A PROJECT
+while read proj gen cla pos
+do
+	PROJECT["$proj","$gen","$cla"]="$pos"
+done < <(cat <(echo ${PROJ[@]}) <(echo ${GENE[@]}) <(echo ${CLADE[@]}) | transpose | awk '{print $0,NR-1}' | sort -k 1,1 -k 2,2 -k 3,3 -k 4,4n | awk '{if(NR==1){p=$1;g=$2;c=$3;printf "%s %s %s %s",p,g,c,$4} else {if($1==p && $2==g && $3==c){printf " %s",$4} else {printf "\n%s %s %s %s",$1,$2,$3,$4;p=$1;g=$2;c=$3}}}END{printf "\n"}')
+
+# loop over project, gene and clade
+for h in ${!PROJECT[@]}
+do
+	read -r i j x < <(echo ${h//,/ })
+	# process each read individually
+	for k in ${PROJECT[$i,$j,$x]}
+	do
+		if [ $DEBUG -eq 1 ] ; then echo $k ; fi
+		# control orientation and primers
+		if [ "${SEQDIR[$k]}" == "forward" ] || [ "${SEQDIR[$k]}" == "reverse" ]
+		then
+			fwd=${PRIMSEQ[$k]} ; fwdn=${PRIM[$k]} ; rvs=${REVSEQ[$k]} ; rvsn=${REV[$k]}
+		else
+			error_help "the sequence orientation for the sample $sam is wrong : ${SEQDIR[$k]}. The orientation should be either forward or reverse"
+		fi
+		if [ -s $DIR/${AB[$k]%.*}.txt ]
+		then
+			RAWLEN=$(seqkit stat -T $DIR/${AB[$k]%.*}.txt | sed '1d' | cut -f 5)
+		else
+			tracy basecall -p 0 -f fasta -o ${AB[$k]%.*}.txt $DIR/${AB[$k]} > /dev/null
+			RAWLEN=$(seqkit stat -T ${AB[$k]%.*}.txt | sed '1d' | cut -f 5)
+			rm ${AB[$k]%.*}.txt
+		fi
+		
+		if [ $RAWLEN -lt $MINLR ]
+		then
+			printf "%s.%s.%s %s at %s\n\traw sequence in %s file have a raw length of %s nt, below the minimum of %s nt to process, skip\n\n" ${SAM[$k]} ${PRIM[$k]} ${REV[$k]} ${SEQDIR[$k]} ${CELL[$k]} ${AB[$k]} $RAWLEN $MINLR | tee -a info.$i.$j.$x.${CELL[$k]}
+			SEQDIR[$k]=too_small
+			continue
+		fi
+		printf "%s.%s.%s %s at %s\n\traw sequence in %s file, raw length of %s nt\n" ${SAM[$k]} ${PRIM[$k]} ${REV[$k]} ${SEQDIR[$k]} ${CELL[$k]} ${AB[$k]} $RAWLEN >> info.$i.$j.$x.${CELL[$k]}
+			
+		# tracy basecall
+		tracy basecall -p $PEAK $DIR/${AB[$k]} -f fastq -o $k.clean.fq > log.$k.txt
+		CALLEN=$(seqkit stat -T $k.clean.fq | sed '1d' | cut -f 5)
+		if [ $CALLEN -lt $MINLR ]
+		then
+			printf "%s.%s.%s %s at %s\n\tthe length after tracy basecall is %s nt, below the minimum of %s nt to process, skip\n\n" ${SAM[$k]} ${PRIM[$k]} ${REV[$k]} ${SEQDIR[$k]} ${CELL[$k]} $CALLEN $MINLR | tee -a info.$i.$j.$x.${CELL[$k]}
+			SEQDIR[$k]=too_small
+			continue
+		fi
+		printf "\tbasecall with tracy basecall; length %s nt, mean quality %s\n" $(awk 'NR==2{print length($1)}' $k.clean.fq)  $(seqkit fx2tab -inq $k.clean.fq | cut -f 2) >> info.$i.$j.$x.${CELL[$k]}
+			
+		# select reference sequence if any
+		if [ ! -z "${REF[$k]}" ]
+		then
+			if [ $(seqkit stat -T ${REF[$k]} | sed '1d' | cut -f 4) -gt 1 ]
+			then
+				seqkit grep -sr -p '^[ATCGN]*$' ${REF[$k]} | seqkit grep -nr -p "${ORGA[$k]// /_}" | seqkit head -n 1 -w0 > ref.$k.fasta
+				if [ ! -s ref.$k.fasta ]
+				then
+					seqkit grep -sr -p '^[ATCGN]*$' ${REF[$k]} | seqkit grep -nr -p "$(echo ${ORGA[$k]} | sed 's/[_ ].*//')" | seqkit head -n 1 -w0  > ref.$k.fasta
+				fi
+				if [ ! -s ref.$k.fasta ]
+				then
+					seqkit grep -sr -p '^[ATCGN]*$' ${REF[$k]} | seqkit grep -nr -p "$x" | seqkit head -n 1 -w0  > ref.$k.fasta
+				fi
+			fi
+		# fetch genbank to create reference sequence
+		elif [ ! -z "$DJIIN" ]
+		then
+			if [ ! -f $x.$j.cut.fasta ]
+			then
+				rvsrc=$(echo -e ">${rvsn}\n$rvs" | seqkit seq -rpv -t dna | tail -1)
+				esearch -db nuccore -query "${x}[Organism] AND ${j} AND 1000:30000[Sequence Length]" | efetch -format fasta | cutadapt --trimmed-only -g "${fwd};rightmost" -O $((${#fwd}-5)) -e 0.2 - 2> log.cutadapt.fetch.$x.$j.txt | cutadapt --trimmed-only -a ${rvsrc} -O $((${#rvs}-5)) -e 0.2 -M $MAXLA - 2>> log.cutadapt.fetch.$x.$j.txt | seqkit grep -sr -p '^[ATCGN]*$' | seqkit rmdup --quiet -s | seqkit sort --quiet -lr -w0 > $x.$j.cut.fasta
+				if [ ! -s $x.$j.cut.fasta ]
+				then
+					echo "No sequence could be retrieve from genbank for option -j for the clade $x and the target gene $j. Primers and flanking regions will be removed with cutadapt instead."
+				fi
+			fi
+			if [ -s $x.$j.cut.fasta ]
+			then
+				# longest sequence matching organism name, if any
+				seqkit grep -nr -p "$(echo ${ORGA[$k]} | sed 's/[_ ].*//')" $x.$j.cut.fasta | seqkit head -n 1 -w0 > ref.$k.fasta
+				if [ ! -s ref.$k.fasta ]
+				then
+					# or use the median length sequence
+					med=$(($(grep -c "^>" $x.$j.cut.fasta)/2))
+					seqkit range -r $med:$med -w0 $x.$j.cut.fasta > ref.$k.fasta
+				fi
+			fi
+		fi
+		
+		# remove primer region and external regions
+		if [ -s ref.$k.fasta ]
+		then
+			if [ "${SEQDIR[$k]}" == "reverse" ]
+			then
+				echo -e "\treverse complement" >> info.$i.$j.$x.${CELL[$k]}
+				seqkit seq -rpv -t dna $k.clean.fq > $k.tmp && mv $k.tmp $k.clean.fq
+			fi
+			# align with HMMER against reference and trim unaligned bases
+			HMM=$(for l in ${PROJECT[$i,$j,$x]/$k*/}; do if [ -f ref.$l.hmm ] && [ ! -L ref.$l.hmm ] ; then if [ ! -z "$(grep $(seqkit seq -in ref.$k.fasta) ref.$l.fasta)" ] ; then echo $l ; break ; fi ; fi ; done)
+			if [ -z "$HMM" ]
+			then
+				hmmbuild ref.$k.hmm ref.$k.fasta > /dev/null
+			else
+				ln -s ref.$HMM.hmm ref.$k.hmm
+			fi
+			hmmalign --trim --outformat A2M ref.$k.hmm <(seqkit fq2fa $k.clean.fq) | seqkit seq -g -w0 > $k.ali.fa
+			#seqkit fq2fa $k.clean.fq | cat - <(seqkit seq -i ref.$k.fasta) | linsi --quiet --lop 5 --lep 10 - | seqkit seq -w0 -u > $k.align.fa # modify alignment parameter to favorise short gap in order to avoid long end gaps between first/last ref nt and the rest of the sequence
+			# and remove end-gaps
+			#seqkit head -n 1 $k.align.fa | seqkit subseq -w0 -r $(($(seqkit range -r -1:-1 $k.align.fa | goalign stats gaps --from-start | cut -f 2)+1)):-$(($(seqkit range -r -1:-1 $k.align.fa | goalign stats gaps --from-end | cut -f 2)+1)) | goalign clean sites -q > $k.ali.fa
+			seqkit fq2fa $k.clean.fq | cat - $k.ali.fa | ginsi --quiet - | seqkit seq -w0 -u > $k.align2.fa # --lexp -0.5 --lep -0.5
+			seqkit subseq -w0 -r $(($(seqkit range -r -1:-1 $k.align2.fa | goalign stats gaps --from-start | cut -f 2)+1)):-$(($(seqkit range -r -1:-1 $k.align2.fa | goalign stats gaps --from-end | cut -f 2)+1)) $k.clean.fq > $k.cut.fq
+			printf "\thmmer alignment against the reference sequence %s ; length %s nt, mean quality %s\n" $(seqkit seq -in ref.$k.fasta) $(seqkit stat -T $k.cut.fq | sed '1d' | cut -f 5) $(seqkit fx2tab -inq $k.cut.fq | cut -f 2) >> info.$i.$j.$x.${CELL[$k]}
+			ANN="aligned_with=$(seqkit seq -in ref.$k.fasta)"
+		else
+			# OR try to cut with primers
+			if [ "${SEQDIR[$k]}" == "reverse" ]
+			then
+				echo -e "\treverse complement" >> info.$i.$j.$x.${CELL[$k]}
+				cutadapt -g ${rvs} -O $((${#rvs}/2)) -e $ERR $k.clean.fq 2>> log.$k.txt | seqkit seq -w0 -rpv -t dna | cutadapt -g ${fwd} -O $((${#fwd}/2)) -e $ERR - 2>> log.$k.txt > $k.cut.fq
+				PMATCH=$(sed -n '/^Reads with adapters:/p' log.$k.txt | paste <(printf "%s\n%s\n" "reverse" "forward") - | awk 'BEGIN{i=0}$5==1{i=1;print $1}END{if(i==0){print "no"}}')
+			else
+				cutadapt -g ${fwd} -O $((${#fwd}/2)) -e $ERR $k.clean.fq 2>> log.$k.txt | seqkit seq -rpv -t dna | cutadapt -g ${rvs} -O $((${#rvs}/2)) -e $ERR - 2>> log.$k.txt | seqkit seq -w0 -rpv -t dna > $k.cut.fq
+				PMATCH=$(sed -n '/^Reads with adapters:/p' log.$k.txt | paste <(printf "%s\n%s\n" "forward" "reverse") - | awk 'BEGIN{i=0}$5==1{i=1;print $1}END{if(i==0){print "no"}}')
+			fi
+			printf "\tcutadapt %s ; length %s nt\n" "$(for i in ${PMATCH[*]}; do echo found $i primer ; done | tr "\n" "#" | sed 's/#$//;s/#/ and /')" $(awk 'NR==2{print length($1)}' $k.cut.fq) >> info.$i.$j.$x.${CELL[$k]}
+			ANN="primer_removed=$(echo $PMATCH | sed 's/ /_and_/')"
+		fi
+		
+		# quality window trimming
+		sickle se -t sanger -q $TRIM -f $k.cut.fq -o $k.trim.fq >> log.$k.txt
+		if [ ! -s $k.trim.fq ]
+		then
+			printf "%s.%s.%s %s at %s\n\t\tquality trimming with sickle discard the entire sequence at quality threshold %s, skip\n\n" ${SAM[$k]} ${PRIM[$k]} ${REV[$k]} ${SEQDIR[$k]} ${CELL[$k]} $TRIM | tee -a info.$i.$j.$x.${CELL[$k]}
+			SEQDIR[$k]=too_small
+			continue
+		fi
+		seqkit fq2fa -w0 $k.trim.fq | sed "s/^>.*$/>${AB[$k]%.*};sample=${SAM[$k]};organism=${ORGA[$k]// /_};clade=${x};gene=${j};primer_forward=${fwdn};primer_reverse=${rvsn};$ANN/" > $i.$j.$x.${CELL[$k]}.trim.fa
+		printf "\tquality trimming with sickle; length %s nt, mean quality %s\n\n" $(awk 'NR==2{print length($1)}' $i.$j.$x.${CELL[$k]}.trim.fa) $(seqkit fx2tab -inq $k.trim.fq | cut -f 2) >> info.$i.$j.$x.${CELL[$k]}
+		if [ ! -z "$FASTQ" ]
+		then
+			 sed "/1/s/^@.*$/@${AB[$k]%.*};sample=${SAM[$k]};organism=${ORGA[$k]// /_};clade=${x};gene=${j};primer_forward=${fwdn};primer_reverse=${rvsn};$ANN/" $k.trim.fq > $i.$j.$x.${CELL[$k]}.trim.fq
+		fi
+	done
+	
+	# determine if pair-end or single end
+	for k in ${PROJECT[$i,$j,$x]}
+	do
+		echo ${SAM[$k]} $k ${SEQDIR[$k]}
+	done | grep -v "too_small" | sort -k 1,1 -k 3,3 | awk '{if(NR==1){p=$1;printf "%s %s",p,$2} else {if($1==p){printf " %s",$2} else {printf "\n%s %s",$1,$2;p=$1}}}END{printf "\n"}' | awk '{if(NF==3){print "pair",$0} else print "single",$0}' > pairs
+	
+	# process paired samples
+	while read type sam pos
+	do
+		allpos=($(echo $pos))
+		for k in ${allpos[@]}
+		do
+			if [ "${SEQDIR[$k]}" == "forward" ]
+			then
+				pos=$k ; fwd=${PRIMSEQ[$k]} ; fwdn=${PRIM[$k]} ; rvs=${REVSEQ[$k]} ; rvsn=${REV[$k]}
+			elif [ "${SEQDIR[$k]}" == "reverse" ]
+			then
+				rev=$k ; fwdr=${REVSEQ[$k]} ; fwdnr=${REV[$k]} ; rvsr=${PRIMSEQ[$k]} ; rvsnr=${PRIM[$k]}
+			fi
+		done
+		for k in fwd fwdn rvs rvsn
+		do
+			l=${k}r
+			if [ "${!k}" != "${!l}" ]
+			then
+				error_help "sample $sam have different primer for forward (${!k}) and reverse (${!l}) sequence"
+			fi
+		done
+		pname="${CELL[$pos]}-${CELL[$rev]}"
+		if [ $DEBUG -eq 1 ] ; then echo $pname ; fi
+		
+		# merge info files
+		cat info.$i.$j.$x.${CELL[$pos]} info.$i.$j.$x.${CELL[$rev]} > info.$i.$j.$x.$pname
+		rm info.$i.$j.$x.${CELL[$pos]} info.$i.$j.$x.${CELL[$rev]}
+		
+		# pair end merge with NGmerge using cut sequences (keep bad quality potentially removed by sickle): only the overlapping part is kept
+		seqkit seq -rpv -t dna $rev.cut.fq > $rev.cut.r.fq
+		NGmerge -1 $pos.cut.fq -2 $rev.cut.r.fq -o $pname.pair.fq -d -v -p 0.4 -q 33 -u 60 -w $BTK/utils/qual_profile.60.txt 2>> log.$pname.txt # use own quality profile for 0 to 60 Phred score
+				
+		if [ -s $pname.pair.fq ]
+		then
+			QUAL=$(seqkit fx2tab -inq $pname.pair.fq | cut -f 2)
+			PAIR=NGmerge
+			# keep assemble region, but force bad quality nucleotide if found in both reads
+			cat $pos.cut.fq $rev.cut.fq $pname.pair.fq | seqkit fq2fa | ginsi --quiet - | goalign consensus 2>/dev/null | seqkit seq -w0 -g > $pname.cons.fa
+			# add 3'-ends (dovetail) overhangs if any
+			cat $pos.trim.fq $rev.trim.fq | seqkit fq2fa | cat - $pname.cons.fa | ginsi --quiet - | seqkit seq -w0 -u > $pname.pair.ali
+			seqkit range -r -1:-1 $pname.pair.ali | goalign stats --per-sequences 2> /dev/null > $pname.ends
+			GS=$(sed '1d' $pname.ends | cut -f 3)
+			GE=$(sed '1d' $pname.ends | cut -f 4)
+			if [ $GS -gt 0 ]
+			then
+				if [ $GE -gt 0 ]
+				then
+					paste -d "" <(seqkit range -r 2:2 $pname.pair.ali | seqkit subseq -w0 -r 1:$GS) $pname.cons.fa <(seqkit head -n 1 $pname.pair.ali | seqkit subseq -w0 -r -$GE:-1) | sed 's/^\(>[^>]*\).*/\1/' > $pname.tmp.fa
+				else
+					paste -d "" <(seqkit range -r 2:2 $pname.pair.ali | seqkit subseq -w0 -r 1:$GS) $pname.cons.fa | sed 's/^\(>[^>]*\).*/\1/' > $pname.tmp.fa
+				fi
+			elif [ $GE -gt 0 ]
+			then
+				paste -d "" $pname.cons.fa <(seqkit subseq -w0 -r -$GE:-1 $i.$j.$x.${CELL[$pos]}.trim.fa 2> /dev/null) > $pname.tmp.fa
+			else
+				ln -s $pname.cons.fa $pname.tmp.fa
+			fi
+			tail -1 $pname.tmp.fa | cat <(sed -n "1{s/^[^;]*;/>$pname;/;s/;\([^;]*\)$/;${SEQDIR[$pos]}_seq_\1/;p}" $i.$j.$x.${CELL[$pos]}.trim.fa | paste -d ";" - <(sed -n "1{s/^.*;\([^;]*\)$/${SEQDIR[$rev]}_seq_\1;paired=NGmerge/;p}" $i.$j.$x.${CELL[$rev]}.trim.fa)) - > $i.$j.$x.$pname.trim.fa
+		else
+			PAIR="consensus"
+			# consensus being conservative: remove all gaps between aligned forward and reverse sequences
+			cat $pos.trim.fq $rev.trim.fq | seqkit fq2fa | mafft --quiet --globalpair --maxiterate 1000 - | seqkit seq -u -w0 | goalign consensus --ignore-gaps | seqkit seq -u -w0 | tail -1 | cat <(sed -n "1{s/^[^;]*;/>$pname;/;s/;\([^;]*\)$/;${SEQDIR[$pos]}_seq_\1/;p}" $i.$j.$x.${CELL[$pos]}.trim.fa | paste -d ";" - <(sed -n "1{s/^.*;\([^;]*\)$/${SEQDIR[$rev]}_seq_\1;paired=consensus/;p}" $i.$j.$x.${CELL[$rev]}.trim.fa)) - > $i.$j.$x.$pname.trim.fa
+		fi
+		
+		rm $i.$j.$x.${CELL[$pos]}.trim.fa $i.$j.$x.${CELL[$rev]}.trim.fa
+		
+		printf "%s pair of sequences from %s and %s\n\tpaired using %s, sequence length %s nt\n\n" ${SAM[$pos]} ${AB[$pos]} ${AB[$rev]} "$PAIR" $(seqkit stat -T $i.$j.$x.$pname.trim.fa | sed '1d' | cut -f 5) >> info.$i.$j.$x.$pname
+		
+		#tracy assemble -t 0 -p $PEAK $ALIGN -a fastq -o $pname.ass $DIR/${AB[$rev]} $DIR/${AB[$pos]} > log.$pname.txt
+		
+		#tracy consensus -q 0 -u 0 -r 0 -s 0 -p $PEAK $ALIGN -b $pname -o $pname.pair $DIR/${AB[$pos]} $DIR/${AB[$rev]} > log.$name.txt
+		
+	done < <(grep pair pairs)
+	
+	cat info.$i.$j.$x.* > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.txt
+	cat $i.$j.$x.*trim.fa | einsi --quiet - | seqkit seq -w0 -u > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta
+	
+	if [ ! -s $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta ]
+	then
+		echo "Issue during concatenation and alignment of the cleaned sequenced for project $i and gene $j."
+		continue
+	fi
+	
+	if [ ! -z "$FASTQ" ]
+	then
+		cat $i.$j.$x.*trim.fq > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fastq
+	fi
+	
+	# BLAST
+	if [ ! -z "$DB" ]
+	then
+		if [ ! -z "$CONSP" ] ; then CONSO=$(echo "$CONSP" | sed "s/%c/$x/") ; fi
+		if [ "$DEBUG" == 1 ] ; then CDEBUG=" -k" ; fi
+		COMM="consensus_blast -n $NCPUS $CONSO$CDEBUG -d $DB -o $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.hits_blast.tsv $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv"
+		eval "$COMM"
+		# post processing blast result to improve readability
+		#PARAM=$(cut -f 1 $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv | cut -d ";" -f 2- | sed '1d;s/=[^=;]*//g;s/;/\n/g' | nl | sort -k 2 -k 1n | uniq -f 1 | sort -k1n | cut -f2- | tr "\n" "#" | sed 's/#$//')
+		PARAM=$(cut -f 1 $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv | sed 's/=[^;]*//g' | awk 'NR>1{l=split($1,a,";");for(i=2;i<=l;i++){p[a[i]]+=i;c[a[i]]+=1}}END{for(i in p){print i,p[i]/c[i]}}' | grep -v "^ " | sort -k 2,2n | cut -d " " -f 1 | tr "\n" "#" | sed 's/#$//')
+		awk -v p=$PARAM 'BEGIN{FS=OFS="\t"; l=split(p,P,"#")}{if(NR==1){for(i=1;i<=l;i++){sub("$","\t"P[i],$1)}; sub("consensus_taxonomy","consensus_organism\tconsensus_taxonomy")} else {split("",param);m=split($1,a,";");for(i=2;i<=m;i++){split(a[i],b,"=");param[b[1]]=b[2]};sub(";.*","",$1);for(i=1;i<=l;i++){sub("$","\t"param[P[i]],$1)}; n=split($4,t,"|"); sub("^",t[n]"\t",$4)}; print}' $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv > tmp.$i.$j.$x && mv tmp.$i.$j.$x $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv
+	fi
+done
+
+finish $DEBUG

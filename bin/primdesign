@@ -1,0 +1,462 @@
+#!/bin/bash
+
+# Usage info
+show_help() {
+cat << EOF
+
+NAME
+	primdesign - design primer pairs in-silico to optimize taxonomic coverage, specificity and precision of barcoding gene
+	
+SYNOPSIS
+	Usage: ${0##*/} [ -bghv ] [ -a apolla_options ] [-c clade_list ] [-d database] [ -e error ] [ -f tm_diff ] [ -j cores ] [ -l minl-maxl ] [ -o outgroup ] [ -p minp-maxp ] [ -t tm_range ] [ -u target_level ] [ -w outgroup_level ] target_clade
+
+DESCRIPTION
+	-h	display this help and exit
+	
+	-a	APOLLA_OPTIONS
+		quoted list of option(s) for the apolla command to set target/outgroup coverage thresholds, GC percentage range and maximum number of variant of probes, default: '-g 40-60 -c 70 -k 1 -m 10 -n 5 -w 50'
+		
+	-b	debug on, avoid deleting temporay directory
+
+	-c CLADE1[,CLADE2,...]
+		reduce the analyses to one or multiple clades, provided as comma separated list; the target clade and the outgroup clade(s) (if any) have to be part of one of these provided clades; default use the entire database
+
+	-d DATABASE
+		full path to database description file. The description file is a tab-separated files with "fasta" and "taxonomy" in the first column, and the filenames of the corresponding fasta file and taxonomy file of the databases in the second column. An optional line labeled with "alignment" in the first column may be provided with the filename of the aligned version of the fasta file in the second column. All three or four files need to be in the same directory. The taxonomy format should be a sequence identifier, a tabulation and a taxonomy path of the format rank:taxa;rank:taxa[;rank:taxa]* . There is no default, this option is compulsory.
+	
+	-e ERROR
+		maximum number of error/mismatch allowed on the primer sequence, default: 0
+	
+	-f TM_DIFF
+		maximum difference in melting temperature between the two primers in a pair, default: 10
+	
+	-g X:XL-Y:YL
+		minimum X and Y amount of G/C bases at 3'- and 5'-ends with length XL and YL (e.g. 2:5-2:5 for at least 2 GC bases at both 5 bases long 3'- and 5'-ends) , default: 0:0-0:0 (i.e. no minimum)
+
+	-j CORES
+		number of CPU cores to use in parallel, default: 1
+	
+	-i INDICES
+		minimum threshold of the barcodes indices (coverage, specificty and precision), default: 0.7-0.1-0.9
+	
+	-l MINLENGTH,MAXLENGTH
+		length range of the amplified barcode, default: 300-450
+	
+	-o OUTGROUP,OUTGROUP,...
+		outgroup clade(s), provided as a comma separated list; if no outgroup clade is provided, all non-target clades are considered as outgroup, this is the default
+		
+	-p MINLENGTH,MAXLENGTH
+		length range of the primer sequences, default: 18-22
+	
+	-s	speed up computation by keeping only one sequence per taxonomic path in the outgroup sequences
+	
+	-t TM_RANGE
+		melting temprature range in °C, default: 50-65
+
+	-u LEVEL
+		taxonomic level for target group summary statistic, either a real number or the rank name, default: family
+
+	-v	turn verbose mode on, default off
+
+	-w OUTGROUP_LEVEL
+		taxonomic level for outgroup summary statistic, either a real number or the rank name, default: class
+
+AUTHOR
+	Guillaume Lentendu
+
+COPYRIGHT
+	Copyright (C) 2021 Guillaume Lentendu
+
+EOF
+}
+
+error_help(){
+	echo "#Error: $1"
+	show_help | fmt -s -w $(tput cols)
+	rm -f /tmp/primdesign.$STIME.set
+	exit 1
+} >&2
+
+error_stop(){
+	echo -e "#Error: $1"
+	finish $DEBUG
+	exit 1
+} >&2
+
+finish(){
+	if [ "$1" -eq 0 ]
+	then
+		cd ..
+		rm -r primdesign.$HASH $TEMPENV
+	else
+		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
+		ln -s $BTK/utils/load_env $PWD
+		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
+		>&2 echo "cd primdesign.$HASH && source ./load_env"
+		rm $TEMPENV
+		cd ..
+	fi
+}
+
+# store initial environment
+TEMPENV=$(mktemp)
+(set -o posix; set > $TEMPENV)
+START_TIME=`date +%s`
+INIT_DIR=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+
+# Option's default value
+APOLOPT="-g 40-60 -c 70 -k 1 -m 10 -n 5 -w 50"
+DEBUG=0
+ERR=0
+NCPUS=1
+MINBC=0.7
+MINBS=0.1
+MINBP=0.9
+MINL=300
+MAXL=450
+MINP=18
+MAXP=22
+SPEED=0
+TMDIFF=10
+MINTM=50
+MAXTM=65
+TARGLEV=family
+OUTGLEV=class
+
+# get options
+while getopts ":a:bc:d:e:f:g:hi:j:l:o:p:st:u:vw:" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			rm -f /tmp/primcheck.$STIME.set
+			exit 0;;
+		a)	APOLOPT="${OPTARG}";;
+		b)	DEBUG=1;;
+		c)	CLADE=($(echo ${OPTARG//,/ }));;
+		d)	[[ -s ${OPTARG} ]] || error_help " ${OPTARG} is not a file or is empty"
+			DBTMP=$(readlink -f "${OPTARG}"); DBF="${DBTMP##*/}"; DBDIR="${DBTMP%/*}";;
+		e)	ERR=${OPTARG};;
+		f)	[[ ${OPTARG} =~ ^[0-9]+$ ]] || error_help " ${OPTARG} is not an integer"
+			TMDIFF=${OPTARG};;
+		g)	[[ ${OPTARG} =~ ^[0-9]:[0-9]-[0-9]:[0-9]$ ]] || error_help " -g option ${OPTARG} have to be in the format INT:INT-INT:INT"
+			read GCFB GCFL GCRB GCRL <<< ${OPTARG//[-:]/ };;
+		i)	[[ ${OPTARG} =~ ^[0-9].*[0-9]*-[0-9].*[0-9]*-[0-9].*[0-9]*$ ]] || error_help " -i option ${OPTARG} have to be in the format FLOAT-FLOAT-FLOAT"
+			read MINBC MINBS MINBP <<< ${OPTARG//-/ };;
+		j)	NCPUS=${OPTARG};;
+		l)	read MINL MAXL < <(echo ${OPTARG/-/ });;
+		p)	read MINP MAXP < <(echo ${OPTARG/-/ });;
+		o)	OUTGROUP=($(echo ${OPTARG//,/ }));;
+		s)	SPEED=1;;
+		t)	[[ ${OPTARG} =~ ^[0-9][0-9]*-[0-9][0-9]*$ ]] || error_help " -t option ${OPTARG} have to be in the format INT-INT"
+			read MINTM MAXTM <<< ${OPTARG/-/ };;
+		u)	TARGLEV=${OPTARG};;
+		v)	VERBOSE=1;;
+		w)	OUTGLEV=${OPTARG};;
+		\?)	error_help "# Invalid option: -${OPTARG}"
+			;;
+		:)	error_help "# Option -${OPTARG} requires an argument."
+			;;
+	esac
+done
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
+# target
+if [ -z "$1" ]
+then 
+	error_help "the target clade is missing."
+else
+	TARG=$1; shift
+fi
+
+# generate instance hash and working directory
+TEMP=$(mktemp)
+join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > $TEMP
+HASH=`cksum $TEMP | awk '{print $1}'`
+mkdir primdesign.$HASH && cd primdesign.$HASH
+mv $TEMP tmp_env
+
+# database
+DBFASTA=$(awk '$1=="fasta"{print $2}' $DBDIR/$DBF)
+DBTAXO=$(awk '$1=="taxonomy"{print $2}' $DBDIR/$DBF)
+DBALIGN=$(awk '$1=="alignment"{print $2}' $DBDIR/$DBF)
+DBUTAX=$(awk '$1=="utax"{print $2}' $DBDIR/$DBF)
+if [ -n "$CLADE" ]
+then
+	for i in ${CLADE[@]}; do grep ":$i;" $DBDIR/$DBTAXO | sed "s/\t.*;\([^:]*:$i;\)/\t\1/" ; done > db.taxo
+	if [ ! -s db.taxo ]
+	then
+		error_stop "No taxonomy path includes ${CLADE[@]} in the database taxonomy file $DBDIR/$DBTAXO ."
+	fi
+	grep ":$TARG;" db.taxo | sed "s/\t.*;\([^:]*:$TARG;\)/\t\1/" > db.targ.taxo
+	if [ -n "$OUTGROUP" ]
+	then
+		for i in ${OUTGROUP[@]}; do grep ":$i;" db.taxo | sed "s/\t.*;\([^:]*:$i;\)/\t\1/" ; done > db.outg.taxo
+	else
+		grep -v ":$TARG;" db.taxo > db.outg.taxo
+	fi
+	rm db.taxo
+else
+	grep ":$TARG;" $DBDIR/$DBTAXO | sed "s/\t.*;\([^:]*:$TARG;\)/\t\1/" > db.targ.taxo
+	if [ -n "$OUTGROUP" ]
+	then
+		for i in ${OUTGROUP[@]}; do grep ":$i;" $DBDIR/$DBTAXO | sed "s/\t.*;\([^:]*:$i;\)/\t\1/" ; done > db.outg.taxo
+	else
+		grep -v ":$TARG;" $DBDIR/$DBTAXO > db.outg.taxo
+	fi
+fi
+
+# control
+if [ ! -s db.targ.taxo ]
+then
+	error_stop "No taxonomy path contains the target clade name $TARG in the database taxonomy file $DBDIR/$DBTAXO ."
+fi
+if [ ! -s db.outg.taxo ]
+then
+	if [ -n "$OUTGROUP" ]
+	then
+		error_stop "No taxonomy path contains the outgroup clade name(s) ${OUTGROUP[@]} in the database taxonomy file $DBDIR/$DBTAXO ."
+	else
+		error_stop "There is no outgroup sequences in the database $DBTMP (i.e. there is only sequences of the target clae $TARG)."
+	fi
+elif [ -n "$(grep -m 1 ":$TARG;" db.outg.taxo)" ] && [ -n "$OUTGROUP" ]
+then
+	error_stop "The outgroup clade(s) ${OUTGROUP[@]} contain(s) the target clade $TARG ."
+fi
+
+# speed up by keeping only one sequence of outgroup per taxonomic path
+if [ $SPEED -eq 1 ]
+then
+	sort -k 2,2 db.outg.taxo | awk '{if(NR==1){p=$2;print $0} else {if($2!=p){p=$2;print $0}}}' > tmp.db.outg.taxo && mv tmp.db.outg.taxo db.outg.taxo
+fi
+
+# fasta and UTAX formats
+seqkit grep -j $NCPUS -w 0 -f <(cut -f 1 db.targ.taxo) $DBDIR/$DBFASTA > db.targ.fasta
+seqkit grep -j $NCPUS -w 0 -f <(cut -f 1 db.outg.taxo) $DBDIR/$DBFASTA > db.outg.fasta
+if [ -z $DBUTAX ]
+then
+	cut -f 1 -d " " db.targ.fasta | paste - - | sed 's/^>//' | sort -k 1,1 | join - <(sort -k 1,1 db.targ.taxo) | awk '{gsub(";",",",$3);print ">"$1";tax="$3"\n"$2}' > db.targ.utax
+	cut -f 1 -d " " db.outg.fasta | paste - - | sed 's/^>//' | sort -k 1,1 | join - <(sort -k 1,1 db.outg.taxo) | awk '{gsub(";",",",$3);print ">"$1";tax="$3"\n"$2}' > db.outg.utax
+else
+	if [ -n "$CLADE" ]
+	then
+		for i in ${CLADE[@]}; do seqkit grep --quiet -j $NCPUS -w 0 -r -p ":$i" $DBDIR/$DBUTAX | sed "s/\t.*;\([^:]*:$i;\)/\t\1/" ; done > db.utax
+		seqkit grep -j $NCPUS -w 0 -r -p ":$TARG" db.utax | sed "s/tax=.*,\([^:]*:$TARG,\)/tax=\1/" > db.targ.utax
+		if [ -n "$OUTGROUP" ]
+		then
+			for i in ${OUTGROUP[@]}; do seqkit --quiet grep -j $NCPUS -w 0 -r -p ":$i" db.utax ; done > db.outg.utax
+		else
+			seqkit grep -j $NCPUS -w 0 -r -v -p ":$TARG" db.utax > db.outg.utax
+		fi
+		rm db.utax
+	else
+		seqkit grep -j $NCPUS -w 0 -r -p ":$TARG" $DBDIR/$DBUTAX | sed "s/tax=.*,\([^:]*:$TARG,\)/tax=\1/" > db.targ.utax
+		if [ -n "$OUTGROUP" ]
+		then
+			for i in ${OUTGROUP[@]}; do seqkit --quiet grep -j $NCPUS -w 0 -r -p ":$i" $DBDIR/$DBUTAX | sed "s/\t.*;\([^:]*:$i;\)/\t\1/" ; done > db.outg.utax
+		else
+			seqkit grep -j $NCPUS -w 0 -r -v -p ":$TARG" $DBDIR/$DBUTAX > db.outg.utax
+		fi
+	fi
+fi
+#seqkit sample --quiet -s100 -p 0.1 -w 0 db.outg.utax > db.outg.small.utax # for apolla with coverage maximization only
+
+# database statistic
+if [[ $TARGLEV =~ ^[0-9]+$ ]]
+then
+	targtaxo () { sed -n '/>/{s/.*tax=//;p}' | cut -d "," -f $TARGLEV | sort | uniq -c ; }
+else
+	targtaxo () { sed -n '/>/{s/.*tax=/=/;p}' | grep -o "[=,]${TARGLEV}:[^,]*" | sed 's/^[,=]//' | sort | uniq -c ; }
+fi
+export -f targtaxo
+if [[ $OUTGLEV =~ ^[0-9]+$ ]]
+then
+	outgtaxo () { sed -n '/>/{s/.*tax=//;p}' | cut -d "," -f $OUTGLEV | sort | uniq -c ; }
+else
+	outgtaxo () { sed -n '/>/{s/.*tax=/=/;p}' | grep -o "[=,]${OUTGLEV}:[^,]*" | sed 's/^[,=]//' | sort | uniq -c ; }
+fi
+export -f outgtaxo
+export TARGLEV OUTGLEV
+cat db.targ.utax | targtaxo > db.targ.stat
+cat db.outg.utax | outgtaxo > db.outg.stat
+TARGSP=$(grep -o ";species:[^;]*" db.targ.taxo | sort -u | wc -l)
+if [ -n "$VERBOSE" ]
+then
+	>&2 echo -e "\nTarget group in the database:"
+	>&2 cat db.targ.stat
+	>&2 echo -e "\nOutgroup in the database:"
+	>&2 cat db.outg.stat
+	>&2 echo
+fi
+
+# call apolla to generate candidate probes
+APOLCOV=$(echo $APOLOPT | sed 's/.*-c \([0-9]*\).*$/\1/')
+APOLOPT2=$(echo $APOLOPT | sed "s/c $APOLCOV/c $((APOLCOV+((100-APOLCOV)/2)))/;s/m [0-9]*/m 100/;s/n [0-9]*/n 100/")
+for i in $(seq $MINP $MAXP)
+do
+	if [ -n "$VERBOSE" ]
+	then
+		>&2 echo -e "\nApolla call for specific primer of length $i with parameter $APOLOPT"
+		>&2 echo -e "Apolla call for optimized coverage primer of length $i with parameter $APOLOPT2\n"
+	fi
+	apolla -j $NCPUS -l $i -u $TARGLEV -v $OUTGLEV -i db.targ.utax -o db.outg.utax $APOLOPT > probe.$i.txt
+	apolla -j $NCPUS -l $i -u $TARGLEV -v $OUTGLEV -i db.targ.utax -o db.outg.utax $APOLOPT2 > probe_cov.$i.txt
+done
+
+if [ $(for i in probe.[0-9]*.txt; do sed '1d' $i ; done | wc -l) -le 1 ]
+then
+	error_stop "No candidate probe was found. Try to relax the coverage parameters for apolla (i.e. option -a)."
+fi
+# alternative with two separate call to apolla to implement:
+#  - one for specific probe with good coverage, as done above
+#  - one for excellent coverage (>90%) without controlling for specificity, use latter for pairs test
+
+# compute average Tm°c (SantaLucia 2004 formula with Owczarzy et al. 2008 salt correction) and filter
+tmelt () {
+	if [ "$1" == "^[ATCG]*$" ]
+	then
+		melting -S$1 -Asan04a.nn -G2.5e-3 -Hdnadna -P3e-7 | sed -n "/Melting/s/.*: \([^ ]*\) .*$/$1 \1/p"
+	else
+		PROBE=($(eval echo $(echo $1 | fold -s1 | nl | sort -k 2,2 | join -1 2 -a 1 - $BTK/utils/IUPAC.txt | sort -k 2,2n | awk '{if(NF==2){printf "%s",$1} else {gsub(/./,"&,",$3);sub(",$","",$3);printf "{%s}",$3}}END{printf "\n"}')))
+		for i in ${PROBE[@]} ; do melting -S$i -Asan04a.nn -G2.5e-3 -Hdnadna -P3e-7 | sed -n '/Melting/s/.*: \([^ ]*\) .*$/\1/p' ; done | awk -v P=$1 '{s+=$1}END{print P,s/FNR}'
+	fi
+}
+export BTK
+export -f tmelt
+for i in probe.[0-9]*.txt ; do sed '1d' $i ; done | cut -f 1 | parallel -k -j $NCPUS tmelt | awk -v I=$MINTM -v A=$MAXTM '$2>=I && $2<=A{n+=1;print n,$0}' | sort -k 2,2 | join -1 2 - <(for i in probe.*.txt; do cut -f 1-3,5-6 $i | sed '1d' ; done | sort -k 1,1) | sort -k 2,2n | sed 's/ / s/;s/$/ S/' > cand.txt
+if [ ! -s cand.txt ]
+then
+	error_stop "No candidate probe was found in the provided Tm range of ${MINTM}-${MAXTM}°C."
+fi
+
+# Add probes with coverage maximization without specificity constrains
+for i in probe_cov.[0-9]*.txt ; do sed '1d' $i ; done | cut -f 1 | parallel -k -j $NCPUS tmelt | awk -v I=$MINTM -v A=$MAXTM '$2>=I && $2<=A{n+=1;print n,$0}' | sort -k 2,2 | join -1 2 - <(for i in probe_cov.*.txt; do cut -f 1-3,5-6 $i | sed '1d' ; done | sort -k 1,1) | sort -k 2,2n | sed 's/ / c/;s/$/ C/' | cat cand.txt - > tmp.cand.txt && mv tmp.cand.txt cand.txt
+
+# control GC at both ends if same parameters
+if [ -n "$GCFB" ]
+then
+	if [[ $GCFB$GCFL == $GCRB$GCRL ]] && [ $GCFB -gt 0 ] && [ $GCFL -gt 0 ]
+	then
+		awk -v B=$GCFB -v L=$GCFL '{F=substr($1,1,L);R=substr($1,length($1)-L+1); if(F~"([CGSBVN].*){"B",}" && R~"([CGSBVN].*){"B",}"){n+=1;sub(".*",tolower($8)n,$2);print $0}}' cand.txt > tmp && mv tmp cand.txt
+		GCOK=1
+		if [ ! -s cand.txt ]
+		then
+			error_stop "No candidate probe was found with the provided GC content of $GCFB:$GCFL at both end."
+		elif [ -z "$(grep "S$" cand.txt)" ] # also stop if no more specific primers
+		then
+			error_stop "No candidate probe was found with the provided GC content of $GCFB:$GCFL at both end."
+		fi
+	fi
+fi
+awk '{print ">"$2"\n"$1}' cand.txt > cand.fasta
+>&2 echo "Found $(sed -n '$=' cand.txt) candidate probes."
+if [ -n "$VERBOSE" ]
+then
+	echo "sequence name Tm length GC variant_obs variant type" | cat - cand.txt | column -t 1>&2
+	>&2 echo
+fi
+
+# place candidate primer on the alignment
+if [ -z $DBALIGN ]
+then
+	seqkit sample --quiet -s100 -n 100 db.targ.fasta | mafft --quiet --preservecase --auto --thread $NCPUS - > db.targ.align
+else
+	seqkit grep -j $NCPUS -w 100 -f <(cut -f 1 db.targ.taxo) $DBDIR/$DBALIGN | seqkit sample --quiet -s100 -n 100 | goalign clean sites -q -c 1 > db.targ.align
+fi
+mafft --quiet --preservecase --thread $NCPUS --auto --addfragments cand.fasta --mapout db.targ.align > /dev/null
+awk 'BEGIN{f=0}{if(NR==1){f=1;sub(">","",$1);printf "%s",$1} else {if($1!~"^#"){if($1~"^>"){f=1;sub(">","",$1);printf " %s\n%s", l,$1} else {if(f==1){f=0;printf " %s", $3} else l=$3}}}}END{printf " %s\n",l}' cand.fasta.map > cand.fasta.pos
+
+# determine pairs matching the barcode length and the Tm difference --> need to parallelize
+for i in $(seq 1 $(($(sed -n '$=' cand.txt)-1)))
+do
+	first=($(sed -n "${i}p" cand.fasta.pos))
+	for j in $(seq $((i+1)) $(sed -n '$=' cand.txt))
+	do
+		second=($(sed -n "${j}p" cand.fasta.pos))
+		if [ ${first[2]} -le ${second[2]} ]
+		then
+			begin=$((${first[2]}+1)); end=$((${second[1]}-1)); pair="${first[0]} ${second[0]}"
+		else
+			begin=$((${second[2]}+1)); end=$((${first[1]}-1)); pair="${second[0]} ${first[0]}"
+		fi
+		if [ $begin -le $((end-MINL)) ]
+		then
+			len=$(seqkit subseq --quiet -w 0 -r $begin:$end db.targ.align | awk '$1!~"^>"{gsub("-","",$1);l+=length($1);n+=1}END{printf "%0.f", l/n+0.5}' 2>/dev/null)
+			if [ $len -ge $MINL ] && [ $len -le $MAXL ]
+			then
+				echo $pair $len
+			fi
+		fi
+	done
+done | sort -k 1,1 | join -2 2 - <(sort -k 2,2 cand.txt) | sort -k 2,2 | join -1 2 - <(seqkit seq --quiet -t dna -r -p cand.fasta | paste - - | sed 's/>//' | sort -k 1,1 | join - <(cut -d " " -f 2- cand.txt | sort -k 1,1)) | awk -v t=$TMDIFF '{d=$5-$11; (d<0)? d=-d: d=d ;if(d<=t){printf "%s %s %s %s %.1f %s %s %s %s_rc %s %s %s %.1f %s %s %s %s %s %.1f\n", $2,$4,$6,$7,$5+0.05,$9,$8,$10,$1,$11,$13,$14,$12+0.05,$16,$15,$17,$6+$13,$3,d+0.05}}' | awk '$9=="S" || $16=="S"{print}' > pairs.txt
+# last awk to get rid of pairs with only coverage optimal primers
+if [ ! -s pairs.txt ]
+then
+	error_stop "No primer pairs amplified fragments of length $MINL-$MAXL nt of the target clade. Try to relax the coverage parameters for apolla (i.e. option -c -k -m and -n)."
+	# alternative: branch here new search for specific pairs vs. best coverage pairs, and keep only pairs with the specific pairs with lowest Tm (or within 2°C)
+fi
+
+# control GC at both ends if not done before
+if [ -n "$GCFB" ] && [ -z "$GCOK" ]
+then
+	awk -v FB=$GCFB -v FL=$GCFL -v RB=$GCRB -v RL=$GCRL '{if(FB>0 && FL>0){Fa=substr($2,1,FL);Fb=substr($9,1,FL);if(Fa~"([CGSBVN].*){"FB",}" && Fb~"([CGSBVN].*){"FB",}"){F=1}} else F=1; if(RB>0 && RL>0){Ra=substr($2,$3-RL+1);Rb=substr($10,$11-RL+1);if(Ra~"([CGSBVN].*){"RB",}" && Rb~"([CGSBVN].*){"RB",}"){R=1}} else R=1; if(F==1 && R==1){print $0}}' pairs.txt > tmp && mv tmp pairs.txt
+fi
+if [ ! -s pairs.txt ]
+then
+	error_stop "No primer pairs have the requested GC content of $GCFB:$GCFL-$GCRB:$GCRL at 5'- and 3'-ends."
+fi
+
+>&2 echo "Found $(sed -n '$=' pairs.txt) candidate primer pairs."
+HEADER="fwd_primer fwd_sequence fwd_length fwd_GC fwd_Tm fwd_variant fwd_variant_obs fwd_type rvs_primer rvs_sequence rvs_length rvs_GC rvs_Tm rvs_variant rvs_variant_obs rvs_type primers_length sequence_length delta_Tm"
+if [ -n "$VERBOSE" ]
+then
+	echo $HEADER | cat - pairs.txt | column -t 1>&2
+	>&2 echo
+fi
+
+# in-silico PCR with cutadapt and Bc, Bs, Bp indices computation
+insilico () {
+	if [ -z "$1" ] ; then read -a line ; else read -a line <<< "$@" ; fi
+	rvs=$(echo -e ">${line[8]}\n${line[9]}" | seqkit seq --quiet -t dna -r -p | tail -1)
+	mismf=$(awk -v E=$ERR -v F=${line[2]} 'BEGIN{printf "%.2f",E/F+0.005}')
+	mismr=$(awk -v E=$ERR -v R=${line[9]} 'BEGIN{printf "%.2f",E/R+0.005}')
+	cutadapt --quiet -g "${line[1]};o=${#line[1]};e=$mismf...$rvs;o=${#rvs};e=$mismr" --no-indels --trimmed-only -o ${line[0]}.${line[8]}.db.targ.utax db.targ.utax
+	cutadapt --quiet -g "${line[1]};o=${#line[1]};e=$mismf...$rvs;o=${#rvs};e=$mismr" --no-indels --trimmed-only -o ${line[0]}.${line[8]}.db.outg.utax db.outg.utax
+	targ=$(cat ${line[0]}.${line[8]}.db.targ.utax | targtaxo | join -1 2 -2 2 -a 2 -o 0,1.1,2.1 -e 0 - db.targ.stat | sed 's/^[^:]*://;s/ /:/;s/ /\//')
+	outg=$(cat ${line[0]}.${line[8]}.db.outg.utax | outgtaxo | join -1 2 -2 2 - db.outg.stat | sed 's/^[^:]*://;s/ /:/;s/ /\//')
+	targsp=$(grep -o ",species:[^,]*" ${line[0]}.${line[8]}.db.targ.utax | sort -u | wc -l)
+	outgsp=$(grep -o ",species:[^,]*" ${line[0]}.${line[8]}.db.outg.utax | sort -u | wc -l)
+	targbc=$(awk -v t=$targsp -v T=$TARGSP 'BEGIN{printf "%.3f", t/T}')
+	targbs=$(awk -v t=$targsp -v o=$outgsp 'BEGIN{printf "%.3f", t/(t+o)}')
+	#targwt=$(sed 's/;tax=.*species:\([^,]*\).*/ sp=\1;/' ${line[0]}.${line[8]}.db.targ.utax | obiuniq -m "sp" -p | grep -o "merged_sp={[^,]*,[^}]*}" | sed "s/merged_sp={//;s/}//;s/'//g;s/: [0-9][0-9]*,*//g" | tr " " "\n" | sort -u | wc -l)
+	# obiuniq replacement
+	targwt=$(sed 's/.*;tax=.*species:\([^,]*\).*/\1/' ${line[0]}.${line[8]}.db.targ.utax | paste - - | sort -k 2,2r | awk '{if(NR==1){prev=$2;printf "%s",$1} else {l=match(prev,$2);if(l>0){printf " %s",$1} else {prev=$2;printf "\n%s",$1}}}END{printf "\n"}' | awk 'NF>1{print}' | tr " " "\n" | sort -u | wc -l)
+	targbp=$(awk -v t=$targsp -v w=$targwt 'BEGIN{printf "%.3f", (t-w)/t}')
+	rm ${line[0]}.${line[7]}.db.targ.utax ${line[0]}.${line[8]}.db.outg.utax
+	echo ${line[@]} $targbc $targbs $targbp | tr " " "\t" | paste - <(echo $targ | sed 's/ /;/g') <(echo ${outg:-none} | sed 's/ /;/g')
+}
+export -f insilico # be careful: only species rank named "species:" is detected for the barcode precision index !!
+export TARGSP ERR
+touch low_Bc_pairs.txt low_Bs_pairs.txt low_Bp_pairs.txt
+parallel -j $NCPUS -k -a pairs.txt insilico | awk -v C=$MINBC -v S=$MINBS -v P=$MINBP '{if($19>=C && $20>=S && $21>=P){print} else {if($19<C){print >> "low_Bc_pairs.txt"};if($20<S){print >> "low_Bs_pairs.txt"};if($21<P){print >> "low_Bp_pairs.txt"}}}' > good_pairs.txt
+# control and report
+if [ ! -s good_pairs.txt ]
+then
+	tbc=$(sed -n '$=' low_Bc_pairs.txt) ; tbs=$(sed -n '$=' low_Bs_pairs.txt) ; tbp=$(sed -n '$=' low_Bp_pairs.txt)
+	error_stop "No primer pair have the requested minimum barcode indices values: ${tbc:-0}, ${tbs:-0} and ${tbp:-0} pairs have too low Bc, Bs and Bp values fixed at $MINBC, $MINBS and $MINBP, respectively."
+else
+	for i in c s p
+	do
+		if [ -s low_B${i}_pairs.txt ]
+		then
+			TMP=MINB${i^}
+			>&2 echo "$(sed -n '$=' low_B${i}_pairs.txt) pairs were removed due to B$i value below the minimum fixed at ${!TMP}."
+		fi
+	done
+	>&2 echo "Found $(sed -n '$=' good_pairs.txt) good primer pairs."
+fi
+
+# output sorted on the barcode indices, on cumulative primer length, on Tm delta and on amplified length
+sort -k 19,19nr -k 20,20nr -k 21,21nr -k 16,16n -k 18,18n -k 17,17nr good_pairs.txt | cat <(echo "$HEADER Bc Bs Bp target outgroup" | sed 's/ /\t/g') -
+
+finish $DEBUG

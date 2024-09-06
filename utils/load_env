@@ -1,0 +1,15 @@
+#!/bin/bash
+
+while read var val
+do
+	unset $var
+	if [[ $val == "(["[0-9]* ]]
+	then
+		declare -a $var="`echo $val | sed 's/].\"/]=\"/g'`"
+	elif [[ $val == "(["[A-za-z]* ]]
+	then
+		declare -A $var="`echo $val | sed 's/].\"/]=\"/g'`"
+	else
+		declare $var="$val"
+	fi
+done < final_env
