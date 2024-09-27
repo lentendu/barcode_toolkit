@@ -313,7 +313,7 @@ then
 		# reorder ranks if matching ncbi taxonomy
 		if [ -z "$(echo ${OUTGRANKS[@]} | tr " " "\n"  | sort | join -v 1 - <(sort $BTK/utils/ncbi_ranks))" ]
 		then
-			OUTGRANKS=($(echo ${OUTGRANKS[@]} | tr " " "\n"  | sort | join -2 2 - <(nl -n ln $BTK/utils/ncbi_ranks | sort -k 2,2) | sort -k 2,2n | cut -d " " -f 1))
+			OUTGRANKS=($(echo ${OUTGRANKS[@]} | tr " " "\n"  | sort | join -2 2 - <(nl $BTK/utils/ncbi_ranks | sort -k 2,2) | sort -k 2,2n | cut -d " " -f 1))
 		fi
 		# for all outgroup sequences
 		printf '%s\n' "${CLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " db_all_stat > tmp.outg.stat
