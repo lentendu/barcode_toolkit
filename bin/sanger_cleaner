@@ -11,10 +11,10 @@ Author
 	Guillaume Lentendu <guillaume.lentendu@unine.ch>
 
 Description
-	sanger cleaner perform basecalling, eventually (pair-end) assembly, quality trimming and primer removal of Sanger sequences.
+	sanger cleaner perform basecalling, alignment against a reference sequence or primer removal, quality trimming and eventually pair-end assembly of Sanger sequences.
 
 Usage
-	$0 [-hbfq] [-a align] [-c 'consensus_blast_parameter'] [-d db] [-e error] [-p peak] [-t trim] -r directory -o output_directory input_table
+	$0 [-hbfq] [-a align] [-c 'consensus_blast_parameter'] [-d db] [-e error] [-g mismatch] [-p peak] [-t trim] -r directory -o output_directory input_table
 
 Options
 	-h	show this help
@@ -32,8 +32,11 @@ Options
 	
 	-e ERROR
 		error rate for cutadapt amount of mismatch(es) allowed to detect and remove primers; default: 0.2
-	
+		
 	-f	force using only samples contains in the input file; default: off, all ab1 files in the input directory have to be in the input file
+	
+	-g MISMATCH
+		NGmerge fraction of mismatches to allow in the overlapped region for pair-end assembly; default: 0.4
 	
 	-j	when no reference sequences are provided, fetch genbank sequences for the clade and target gene, cut them with primers, and if any sequences could be cut with both primers, use them as reference to extract the amplified part of the sequences (i.e. removing primers and flanking regions)
 	
@@ -127,6 +130,7 @@ BTK=$(dirname $(readlink -f $(dirname "$0")))
 ALIGN="-g -10 -e -4 -m 3 -n -5"
 ERR=0.2
 FORCE=F
+MISM=0.4
 MAXLA=1500
 MINLR=10
 PEAK=0.5
@@ -135,7 +139,7 @@ DEBUG=0
 NCPUS=1
 
 # get options
-while getopts ":a:bc:d:e:fhjl:m:n:o:p:qr:t:" opt
+while getopts ":a:bc:d:e:fg:hjl:m:n:o:p:qr:t:" opt
 do
 	case $opt in
 		h)	show_help | fmt -s -w $(tput cols)
@@ -167,6 +171,7 @@ do
 				error_help "value provided to option -e should be a float number between 0 and 1, not ${OPTARG}"
 			fi ;;
 		f)	FORCE=T;;
+		g)	MISM="${OPTARG}";;
 		j)	DJIIN=T;;
 		l)	MAXLA="${OPTARG}";;
 		m)	MINLR="${OPTARG}";;
@@ -480,7 +485,7 @@ do
 		
 		# pair end merge with NGmerge using cut sequences (keep bad quality potentially removed by sickle): only the overlapping part is kept
 		seqkit seq -rpv -t dna $rev.cut.fq > $rev.cut.r.fq
-		NGmerge -1 $pos.cut.fq -2 $rev.cut.r.fq -o $pname.pair.fq -d -v -p 0.4 -q 33 -u 60 -w $BTK/utils/qual_profile.60.txt 2>> log.$pname.txt # use own quality profile for 0 to 60 Phred score
+		NGmerge -1 $pos.cut.fq -2 $rev.cut.r.fq -o $pname.pair.fq -d -v -p $MISM -q 33 -u 60 -w $BTK/utils/qual_profile.60.txt 2>> log.$pname.txt # use own quality profile for 0 to 60 Phred score
 				
 		if [ -s $pname.pair.fq ]
 		then
