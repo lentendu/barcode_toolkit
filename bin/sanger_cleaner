@@ -61,7 +61,7 @@ Options
 		path to directory containing raw ab1 files
 	
 	-t TRIM
-		sickle quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect base allowed) ; default: 30
+		minimum average quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect bases allowed) ; default: 30
 			
 	-x TAXDUMP
 		full path to taxdump with for consensus_blast
@@ -419,7 +419,8 @@ do
 			#seqkit head -n 1 $k.align.fa | seqkit subseq -w0 -r $(($(seqkit range -r -1:-1 $k.align.fa | goalign stats gaps --from-start | cut -f 2)+1)):-$(($(seqkit range -r -1:-1 $k.align.fa | goalign stats gaps --from-end | cut -f 2)+1)) | goalign clean sites -q > $k.ali.fa
 			seqkit fq2fa $k.clean.fq | cat - $k.ali.fa | ginsi --quiet - | seqkit seq -w0 -u > $k.align2.fa # --lexp -0.5 --lep -0.5
 			seqkit subseq -w0 -r $(($(seqkit range -r -1:-1 $k.align2.fa | goalign stats gaps --from-start | cut -f 2)+1)):-$(($(seqkit range -r -1:-1 $k.align2.fa | goalign stats gaps --from-end | cut -f 2)+1)) $k.clean.fq > $k.cut.fq
-			printf "\thmmer alignment against the reference sequence %s ; length %s nt, mean quality %s\n" $(seqkit seq -in ref.$k.fasta) $(seqkit stat -T $k.cut.fq | sed '1d' | cut -f 5) $(seqkit fx2tab -inq $k.cut.fq | cut -f 2) >> info.$i.$j.$x.${CELL[$k]}
+			CUTLEN=$(seqkit stat -T $k.cut.fq | sed '1d' | cut -f 5)
+			printf "\thmmer alignment against the reference sequence %s ; length %s nt, mean quality %s\n" $(seqkit seq -in ref.$k.fasta) $CUTLEN $(qmean $k.cut.fq) >> info.$i.$j.$x.${CELL[$k]}
 			ANN="aligned_with=$(seqkit seq -in ref.$k.fasta)"
 		else
 			# OR try to cut with primers
@@ -432,23 +433,39 @@ do
 				cutadapt -g ${fwd} -O $((${#fwd}/2)) -e $ERR $k.clean.fq 2>> log.$k.txt | seqkit seq -rpv -t dna | cutadapt -g ${rvs} -O $((${#rvs}/2)) -e $ERR - 2>> log.$k.txt | seqkit seq -w0 -rpv -t dna > $k.cut.fq
 				PMATCH=$(sed -n '/^Reads with adapters:/p' log.$k.txt | paste <(printf "%s\n%s\n" "forward" "reverse") - | awk 'BEGIN{i=0}$5==1{i=1;print $1}END{if(i==0){print "no"}}')
 			fi
-			printf "\tcutadapt %s ; length %s nt\n" "$(for i in ${PMATCH[*]}; do echo found $i primer ; done | tr "\n" "#" | sed 's/#$//;s/#/ and /')" $(awk 'NR==2{print length($1)}' $k.cut.fq) >> info.$i.$j.$x.${CELL[$k]}
+			CUTLEN=$(seqkit stat -T $k.cut.fq | sed '1d' | cut -f 5)
+			printf "\tcutadapt %s ; length %s nt\n" "$(for i in ${PMATCH[*]}; do echo found $i primer ; done | tr "\n" "#" | sed 's/#$//;s/#/ and /')" $CUTLEN >> info.$i.$j.$x.${CELL[$k]}
 			ANN="primer_removed=$(echo $PMATCH | sed 's/ /_and_/')"
 		fi
-		
-		# quality window trimming
-		sickle se -t sanger -q $TRIM -f $k.cut.fq -o $k.trim.fq >> log.$k.txt
-		if [ ! -s $k.trim.fq ]
+		if [ $CUTLEN -lt $MINLR ]
 		then
-			printf "%s.%s.%s %s at %s\n\t\tquality trimming with sickle discard the entire sequence at quality threshold %s, skip\n\n" ${SAM[$k]} ${PRIM[$k]} ${REV[$k]} ${SEQDIR[$k]} ${CELL[$k]} $TRIM | tee -a info.$i.$j.$x.${CELL[$k]}
+			printf "\tthe length after extracting region between primers is %s nt, below the minimum of %s nt to process, skip\n\n" $CUTLEN $MINLR | tee -a info.$i.$j.$x.${CELL[$k]}
 			SEQDIR[$k]=too_small
 			continue
 		fi
-		seqkit fq2fa -w0 $k.trim.fq | sed "s/^>.*$/>${AB[$k]%.*};sample=${SAM[$k]};organism=${ORGA[$k]// /_};clade=${x};gene=${j};primer_forward=${fwdn};primer_reverse=${rvsn};$ANN/" > $i.$j.$x.${CELL[$k]}.trim.fa
-		printf "\tquality trimming with sickle; length %s nt, mean quality %s\n\n" $(awk 'NR==2{print length($1)}' $i.$j.$x.${CELL[$k]}.trim.fa) $(seqkit fx2tab -inq $k.trim.fq | cut -f 2) >> info.$i.$j.$x.${CELL[$k]}
+		
+		# quality window trimming: window length 20 times smaller than sequence length
+		cat $k.cut.fq | awk -v a=33 -v t=$TRIM -v w=$((CUTLEN/20)) -f $BTK/utils/longest_sliding.awk > $k.trim.fq
+		if [ ! -s $k.trim.fq ]
+		then
+			printf "%s.%s.%s %s at %s" ${SAM[$k]} ${PRIM[$k]} ${REV[$k]} ${SEQDIR[$k]} ${CELL[$k]}
+			printf "\tsliding window quality trimming discard the entire sequence at quality threshold %s, skip\n\n" $TRIM | tee -a info.$i.$j.$x.${CELL[$k]}
+			SEQDIR[$k]=too_small
+			continue
+		fi
+		QUALLEN=$(seqkit stat -T $k.trim.fq | sed '1d' | cut -f 5)
+		if [ $QUALLEN -lt $MINLR ]
+		then
+			printf "%s.%s.%s %s at %s" ${SAM[$k]} ${PRIM[$k]} ${REV[$k]} ${SEQDIR[$k]} ${CELL[$k]}
+			printf "\tthe length after sliding window quality trimming is %s nt, below the minimum of %s nt to process, skip\n\n" $QUALLEN $MINLR | tee -a info.$i.$j.$x.${CELL[$k]}
+			SEQDIR[$k]=too_small
+			continue
+		fi
+		seqkit fq2fa -w0 $k.trim.fq | sed "s|^>.*$|>${AB[$k]%.*};sample=${SAM[$k]};organism=${ORGA[$k]// /_};clade=${x};gene=${j};primer_forward=${fwdn};primer_reverse=${rvsn};$ANN|" > $i.$j.$x.${CELL[$k]}.trim.fa
+		printf "\tsliding window quality trimming; length %s nt, mean quality %s\n\n" $QUALLEN $(qmean $k.trim.fq) >> info.$i.$j.$x.${CELL[$k]}
 		if [ ! -z "$FASTQ" ]
 		then
-			 sed "/1/s/^@.*$/@${AB[$k]%.*};sample=${SAM[$k]};organism=${ORGA[$k]// /_};clade=${x};gene=${j};primer_forward=${fwdn};primer_reverse=${rvsn};$ANN/" $k.trim.fq > $i.$j.$x.${CELL[$k]}.trim.fq
+			 sed "|1|s|^@.*$|@${AB[$k]%.*};sample=${SAM[$k]};organism=${ORGA[$k]// /_};clade=${x};gene=${j};primer_forward=${fwdn};primer_reverse=${rvsn};$ANN|" $k.trim.fq > $i.$j.$x.${CELL[$k]}.trim.fq
 		fi
 	done
 	

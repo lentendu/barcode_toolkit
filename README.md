@@ -33,7 +33,6 @@ echo "PATH=\$PATH:$PWD/barcode_toolkit/bin" >> ~/.bashrc
 + [pv](https://www.tecmint.com/monitor-copy-backup-tar-progress-in-linux-using-pv-command/)
 + [RATTLE](https://github.com/comprna/RATTLE) (de la Rubia et al., 2022) for nanobass
 + [SeqKit v0.15.0+](https://github.com/shenwei356/seqkit) (Shen et al., 2016)
-+ [sickle v1.33](https://github.com/najoshi/sickle) (Joshi & Fass, 2011)
 + [swarm v2+](https://github.com/torognes/swarm) (Mahé et al., 2015)
 + [taxonkit v0.11.0+](https://github.com/shenwei356/taxonkit) (Shen & Ren, 2021)
 + [tracy v0.7+](https://github.com/gear-genomics/tracy) (Rausch et al.,2020)
@@ -64,7 +63,6 @@ Any of these tools can be call with the -h option to see full options and usage.
 + Camacho, C., Coulouris, G., Avagyan, V., Ma, N., Papadopoulos, J., Bealer, K., & Madden, T. L. (2009). BLAST+: Architecture and applications. BMC Bioinformatics, 10, 421. [10.1186/1471-2105-10-421](https://doi.org/10.1186/1471-2105-10-421)
 + Eddy, S. R. (2011). Accelerated Profile HMM Searches. PLOS Computational Biology, 7(10), e1002195. [10.1371/journal.pcbi.1002195](https://doi.org/10.1371/journal.pcbi.1002195)
 + Gaspar, J. M. (2018). NGmerge: Merging paired-end reads via novel empirically-derived models of sequencing errors. BMC Bioinformatics, 19(1), 536. doi:[10.1186/s12859-018-2579-2](https://doi.org/10.1186/s12859-018-2579-2)
-+ Joshi NA, Fass JN. (2011). Sickle: A sliding-window, adaptive, quality-based trimming tool for FastQ files (Version 1.33) [Software]
 + Kans, J. (2023). Entrez Direct: E-utilities on the Unix Command Line. In Entrez Programming Utilities Help [Internet]. National Center for Biotechnology Information (US). https://www.ncbi.nlm.nih.gov/books/NBK179288/
 + Katoh, K., & Standley, D. M. (2013). MAFFT multiple sequence alignment software version 7: Improvements in performance and usability. Molecular Biology and Evolution, 30(4), 772–780. doi:[10.1093/molbev/mst010](https://doi.org/10.1093/molbev/mst010)
 + Koren, S., Walenz, B. P., Berlin, K., Miller, J. R., Bergman, N. H., & Phillippy, A. M. (2017). Canu: Scalable and accurate long-read assembly via adaptive k-mer weighting and repeat separation. Genome Research, 27(5), 722–736. [10.1101/gr.215087.116](https://doi.org/10.1101/gr.215087.116)
