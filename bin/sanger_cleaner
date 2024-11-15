@@ -125,7 +125,7 @@ finish(){
 qmean () {
 		vsearch --quiet --fastq_stats $1 -fastq_qmin 0 -fastq_qmax 60 -fastq_ascii 33 --log - | sed -n '/^ASCII/,/^    L/p' | head -n -2 | awk 'NR>2{qn+=$2*$4;n+=$4}END{printf "%0.1f\n", qn/n}'
 }
-export -f meanq
+export -f qmean
 
 # store initial environment
 TEMPENV=$(mktemp)
