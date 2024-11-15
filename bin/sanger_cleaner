@@ -383,7 +383,7 @@ do
 			if [ ! -f $x.$j.cut.fasta ]
 			then
 				rvsrc=$(echo -e ">${rvsn}\n$rvs" | seqkit seq -rpv -t dna | tail -1)
-				esearch -db nuccore -query "${x}[Organism] AND ${j} AND 1000:30000[Sequence Length]" | efetch -format fasta | cutadapt --trimmed-only -g "${fwd};rightmost" -O $((${#fwd}-5)) -e 0.2 - 2> log.cutadapt.fetch.$x.$j.txt | cutadapt --trimmed-only -a ${rvsrc} -O $((${#rvs}-5)) -e 0.2 -M $MAXLA - 2>> log.cutadapt.fetch.$x.$j.txt | seqkit grep -sr -p '^[ATCGN]*$' | seqkit rmdup --quiet -s | seqkit sort --quiet -lr -w0 > $x.$j.cut.fasta
+				esearch -db nuccore -query "${x}[Organism] AND ${j} AND 1000:100000[Sequence Length]" | efetch -format fasta | cutadapt --trimmed-only -g "${fwd};rightmost" -O $((${#fwd}-5)) -e 0.2 - 2> log.cutadapt.fetch.$x.$j.txt | cutadapt --trimmed-only -a ${rvsrc} -O $((${#rvs}-5)) -e 0.2 -M $MAXLA - 2>> log.cutadapt.fetch.$x.$j.txt | seqkit grep -sr -p '^[ATCGN]*$' | seqkit rmdup --quiet -s | seqkit sort --quiet -lr -w0 > $x.$j.cut.fasta
 				if [ ! -s $x.$j.cut.fasta ]
 				then
 					echo "No sequence could be retrieve from genbank for option -j for the clade $x and the target gene $j. Primers and flanking regions will be removed with cutadapt instead."
@@ -581,7 +581,7 @@ do
 		# post processing blast result to improve readability
 		#PARAM=$(cut -f 1 $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv | cut -d ";" -f 2- | sed '1d;s/=[^=;]*//g;s/;/\n/g' | nl | sort -k 2 -k 1n | uniq -f 1 | sort -k1n | cut -f2- | tr "\n" "#" | sed 's/#$//')
 		PARAM=$(cut -f 1 $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv | sed 's/=[^;]*//g' | awk 'NR>1{l=split($1,a,";");for(i=2;i<=l;i++){p[a[i]]+=i;c[a[i]]+=1}}END{for(i in p){print i,p[i]/c[i]}}' | grep -v "^ " | sort -k 2,2n | cut -d " " -f 1 | tr "\n" "#" | sed 's/#$//')
-		awk -v p=$PARAM 'BEGIN{FS=OFS="\t"; l=split(p,P,"#")}{if(NR==1){for(i=1;i<=l;i++){sub("$","\t"P[i],$1)}; sub("consensus_taxonomy","consensus_organism\tconsensus_taxonomy")} else {split("",param);m=split($1,a,";");for(i=2;i<=m;i++){split(a[i],b,"=");param[b[1]]=b[2]};sub(";.*","",$1);for(i=1;i<=l;i++){sub("$","\t"param[P[i]],$1)}; n=split($4,t,"|"); sub("^",t[n]"\t",$4)}; print}' $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv > tmp.$i.$j.$x && mv tmp.$i.$j.$x $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv
+		sed 's/|None\t/\t/;s/|None\t/\t/' $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv | awk -v p=$PARAM 'BEGIN{FS=OFS="\t"; l=split(p,P,"#")}{if(NR==1){for(i=1;i<=l;i++){sub("$","\t"P[i],$1)}; sub("consensus_taxonomy","consensus_organism\tconsensus_taxonomy")} else {split("",param);m=split($1,a,";");for(i=2;i<=m;i++){split(a[i],b,"=");param[b[1]]=b[2]};sub(";.*","",$1);for(i=1;i<=l;i++){sub("$","\t"param[P[i]],$1)}; n=split($4,t,"|"); sub("^",t[n]"\t",$4)}; print}' > tmp.$i.$j.$x && mv tmp.$i.$j.$x $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv
 	fi
 done
 
