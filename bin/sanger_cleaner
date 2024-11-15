@@ -392,7 +392,7 @@ do
 			if [ -s $x.$j.cut.fasta ]
 			then
 				# longest sequence matching organism name, if any
-				seqkit grep -nr -p "$(echo ${ORGA[$k]} | sed 's/[_ ].*//')" $x.$j.cut.fasta | seqkit head -n 1 -w0 > ref.$k.fasta
+				seqkit grep -nr -p "$(echo ${ORGA[$k]} | sed 's/[_ ].*//;s/,/_/g')" $x.$j.cut.fasta | seqkit head -n 1 -w0 > ref.$k.fasta
 				if [ ! -s ref.$k.fasta ]
 				then
 					# or use the median length sequence
