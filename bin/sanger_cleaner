@@ -425,9 +425,16 @@ do
 			seqkit fq2fa $k.clean.fq | cat - $k.ali.fa | ginsi --quiet - | seqkit seq -w0 -u > $k.align2.fa # --lexp -0.5 --lep -0.5
 			seqkit subseq -w0 -r $(($(seqkit range -r -1:-1 $k.align2.fa | goalign stats gaps --from-start | cut -f 2)+1)):-$(($(seqkit range -r -1:-1 $k.align2.fa | goalign stats gaps --from-end | cut -f 2)+1)) $k.clean.fq > $k.cut.fq
 			CUTLEN=$(seqkit stat -T $k.cut.fq | sed '1d' | cut -f 5)
-			printf "\thmmer alignment against the reference sequence %s ; length %s nt, mean quality %s\n" $(seqkit seq -in ref.$k.fasta) $CUTLEN $(qmean $k.cut.fq) >> info.$i.$j.$x.${CELL[$k]}
-			ANN="aligned_with=$(seqkit seq -in ref.$k.fasta)"
-		else
+			if [ $CUTLEN -gt $MINLR ]
+			then
+				printf "\thmmer alignment against the reference sequence %s ; length %s nt, mean quality %s\n" $(seqkit seq -in ref.$k.fasta) $CUTLEN $(qmean $k.cut.fq) >> info.$i.$j.$x.${CELL[$k]}
+				ANN="aligned_with=$(seqkit seq -in ref.$k.fasta)"
+			else
+				CUTFLAG=1
+			fi
+		fi
+		if [ ! -s ref.$k.fasta ] | [ ! -z "$CUTFLAG" ]
+		then
 			# OR try to cut with primers
 			if [ "${SEQDIR[$k]}" == "reverse" ]
 			then
@@ -444,7 +451,7 @@ do
 		fi
 		if [ $CUTLEN -lt $MINLR ]
 		then
-			printf "\tthe length after extracting region between primers is %s nt, below the minimum of %s nt to process, skip\n\n" $CUTLEN $MINLR | tee -a info.$i.$j.$x.${CELL[$k]}
+			printf "\tthe length after extracting region between primers below the minimum of %s nt to process, skip\n\n" $MINLR | tee -a info.$i.$j.$x.${CELL[$k]}
 			SEQDIR[$k]=too_small
 			continue
 		fi
