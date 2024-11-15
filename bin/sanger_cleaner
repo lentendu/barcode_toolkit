@@ -122,6 +122,11 @@ finish(){
 	fi
 }
 
+qmean () {
+		vsearch --quiet --fastq_stats $1 -fastq_qmin 0 -fastq_qmax 60 -fastq_ascii 33 --log - | sed -n '/^ASCII/,/^    L/p' | head -n -2 | awk 'NR>2{qn+=$2*$4;n+=$4}END{printf "%0.1f\n", qn/n}'
+}
+export -f meanq
+
 # store initial environment
 TEMPENV=$(mktemp)
 (set -o posix; set > $TEMPENV)
@@ -355,7 +360,7 @@ do
 			SEQDIR[$k]=too_small
 			continue
 		fi
-		printf "\tbasecall with tracy basecall; length %s nt, mean quality %s\n" $(awk 'NR==2{print length($1)}' $k.clean.fq)  $(seqkit fx2tab -inq $k.clean.fq | cut -f 2) >> info.$i.$j.$x.${CELL[$k]}
+		printf "\tbasecall with tracy basecall; length %s nt, mean quality %s\n" $(awk 'NR==2{print length($1)}' $k.clean.fq)  $(qmean $k.clean.fq) >> info.$i.$j.$x.${CELL[$k]}
 			
 		# select reference sequence if any
 		if [ ! -z "${REF[$k]}" ]
@@ -510,7 +515,7 @@ do
 				
 		if [ -s $pname.pair.fq ]
 		then
-			QUAL=$(seqkit fx2tab -inq $pname.pair.fq | cut -f 2)
+			QUAL=$(qmean $pname.pair.fq)
 			PAIR=NGmerge
 			# keep assemble region, but force bad quality nucleotide if found in both reads
 			cat $pos.cut.fq $rev.cut.fq $pname.pair.fq | seqkit fq2fa | ginsi --quiet - | goalign consensus 2>/dev/null | seqkit seq -w0 -g > $pname.cons.fa
