@@ -66,6 +66,8 @@ Tips
 	
 	Other reference databases (e.g UNITE, SILVA, PR2, MIDORI, BOLD, own sequences, ...) can be used, but they need to be formated with makeblastdb and a custom taxdump have to be build with taxonkit (but see https://bioinf.shenwei.me/taxonkit/usage/#create-taxdump).
 	
+	Blastn formated version of MIDORI can be used as is.
+	
 	For remote blastn, using the query option will reduce computation time, e.g. by selecting the target organism(s) (add Fungi to control for contaminants), the target gene and sequence length range.
 	Option -e will also reduce the set of target sequences, thus the computation time.
 	
@@ -269,6 +271,10 @@ then
 	fi
 	# get taxop, remove coverage below 60%, keep best hsp from same subject
 	HEADER="query subject_accession identity alignment_length query_length query_coverage evalue bitscore subject_taxonomy"
+	if [[ $DB =~ [mM][iI][dD][oO][rR][iI] ]]
+	then
+		awk 'BEGIN{FS=OFS="\t"}{l=split($2,a,"_");sub("###.*","",$2);sub(".*",a[l],$3);print}' blast.tsv > tmp.tsv && mv tmp.tsv blast.tsv
+	fi	
 	if [ -z "$TAXONKIT_DB" ]
 	then
 		cut -f 3 blast.tsv | sort -u | efetch -db taxonomy -format xml | xtract -pattern Taxon -element TaxId,ScientificName -block "*/Taxon" -tab "|" -element ScientificName | sort -k 1,1 -t $'\t' | sed 's/|unclassified[^|]*$//;s/[^\t|]*|//;s/ /_/g' | awk '{print $1"\t"$3"|"$2}' | join -t $'\t' -1 3 <(sort -k 3,3 -t $'\t' blast.tsv) - | cut -f 2- | sort -t $'\t' -k 1,1 -k 2,2 -k 3,3nr | awk -F'\t' -v Q=$QCOV 'BEGIN{FS=OFS="\t"}{if($6<Q || ($1==q && $2==s)){next};q=$1;s=$2;sub(".*",sprintf("%.2f",$3),$3);sub(".*",sprintf("%.2f",$6),$6); print}' | sort -t $'\t' -k 1,1 -k 3,3nr | cat <(echo $HEADER | tr " " "\t") - > blast.taxo.tsv
