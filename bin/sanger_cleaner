@@ -433,7 +433,7 @@ do
 				CUTFLAG=1
 			fi
 		fi
-		if [ ! -s ref.$k.fasta ] | [ ! -z "$CUTFLAG" ]
+		if [ ! -s ref.$k.fasta ] || [ ! -z "$CUTFLAG" ]
 		then
 			# OR try to cut with primers
 			if [ "${SEQDIR[$k]}" == "reverse" ]
