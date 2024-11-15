@@ -565,8 +565,16 @@ do
 	done < <(grep pair pairs)
 	
 	cat info.$i.$j.$x.* > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.txt
-	cat $i.$j.$x.*trim.fa | einsi --quiet - | seqkit seq -w0 -u > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta
-	
+	if [ $(cat $i.$j.$x.*trim.fa | grep -c "^>") -eq 0 ]
+	then
+		echo "Issue during concatenation and alignment of the cleaned sequenced for project $i and gene $j."
+		continue
+	elif [ $(cat $i.$j.$x.*trim.fa | grep -c "^>") -eq 1 ]
+	then
+		cat $i.$j.$x.*trim.fa | seqkit seq -w0 -u > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta
+	else
+		cat $i.$j.$x.*trim.fa | einsi --reorder --quiet - | seqkit seq -w0 -u > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta
+	fi
 	if [ ! -s $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta ]
 	then
 		echo "Issue during concatenation and alignment of the cleaned sequenced for project $i and gene $j."
