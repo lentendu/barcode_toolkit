@@ -62,6 +62,9 @@ Options
 	
 	-t TRIM
 		sickle quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect base allowed) ; default: 30
+			
+	-x TAXDUMP
+		full path to taxdump with for consensus_blast
 
 Input table
 	The input table describing a full or partial 96-well plate have to be TAB-separated and have to contain the following columns (in any order):
@@ -139,7 +142,7 @@ DEBUG=0
 NCPUS=1
 
 # get options
-while getopts ":a:bc:d:e:fg:hjl:m:n:o:p:qr:t:" opt
+while getopts ":a:bc:d:e:fg:hjl:m:n:o:p:qr:t:x:" opt
 do
 	case $opt in
 		h)	show_help | fmt -s -w $(tput cols)
@@ -191,6 +194,7 @@ do
 				error_help "# Directory for option -d not found: ${OPTARG}"
 			fi;;
 		t)	TRIM=${OPTARG};;
+		x)	TDB=" -x ${OPTARG}";;
 		\?)	error_help "# Invalid option: -${OPTARG}";;
 		:)	error_help "# Option -${OPTARG} requires an argument.";;
 	esac
@@ -550,7 +554,7 @@ do
 	then
 		if [ ! -z "$CONSP" ] ; then CONSO=$(echo "$CONSP" | sed "s/%c/$x/") ; fi
 		if [ "$DEBUG" == 1 ] ; then CDEBUG=" -k" ; fi
-		COMM="consensus_blast -n $NCPUS $CONSO$CDEBUG -d $DB -o $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.hits_blast.tsv $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv"
+		COMM="consensus_blast -n $NCPUS $CONSO$CDEBUG$TDB -d $DB -o $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.hits_blast.tsv $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv"
 		eval "$COMM"
 		# post processing blast result to improve readability
 		#PARAM=$(cut -f 1 $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv | cut -d ";" -f 2- | sed '1d;s/=[^=;]*//g;s/;/\n/g' | nl | sort -k 2 -k 1n | uniq -f 1 | sort -k1n | cut -f2- | tr "\n" "#" | sed 's/#$//')
