@@ -307,6 +307,6 @@ consensus () {
 export -f consensus
 export SEN
 HEAD="query identity coverage consensus_taxonomy subject_accession"
-sed '1d' blast.taxo.tsv | awk '$1 != p{printf ">"}{p=$1}1' | parallel -j $NCPUS --pipe -kN1 --regexp --recstart "^>" --rrs consensus | cat <(echo $HEAD | tr " " "\t") -
+sed '1d' blast.taxo.tsv | awk '$1 != p{printf ">"}{p=$1}1' | parallel -j $NCPUS --pipe -kN1 --regexp --recstart "^>" --rrs consensus | cat <(echo $HEAD | tr " " "\t") - <(seqkit grep --quiet -w0 -v -f <(sed '1d' blast.tsv | cut -f 1 | sort -u) $IN | seqkit fx2tab -n | awk -v q=$QCOV -v i=$ID 'BEGIN{OFS="\t"}{print $0,"<"i,"<"q,"NA","NA"}')
 
 finish $KEEP
