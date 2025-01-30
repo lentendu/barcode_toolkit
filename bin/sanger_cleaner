@@ -14,13 +14,10 @@ Description
 	sanger cleaner perform basecalling, alignment against a reference sequence or primer removal, quality trimming and eventually pair-end assembly of Sanger sequences.
 
 Usage
-	$0 [-hbfq] [-a align] [-c 'consensus_blast_parameter'] [-d db] [-e error] [-g mismatch] [-p peak] [-t trim] -r directory -o output_directory input_table
+	$0 [-hbfjqv] [-c 'consensus_blast_parameter'] [-d db] [-e error] [-g mismatch] [-l maxlength] [-m minlength] [-n ncpus] [-p peak] [-t trim] [-x taxdump] -r directory -o output_directory input_table
 
 Options
 	-h	show this help
-	
-	-a ALIGN
-		alignment options, either DEFAULT for default alignment parameters for tracy (-g -10 -e -4 -m 3 -n -5) or RELAX for relaxed alignment parameters (-g -2 -e -1 -m 3 -n -2); default is DEFAULT
 	
 	-b debug on, avoid deleting temporay directory
 	
@@ -64,7 +61,7 @@ Options
 		minimum average quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect bases allowed) ; default: 30
 			
 	-x TAXDUMP
-		full path to taxdump with for consensus_blast
+		full path to taxdump for consensus_blast
 
 Input table
 	The input table describing a full or partial 96-well plate have to be TAB-separated and have to contain the following columns (in any order):
@@ -123,7 +120,7 @@ finish(){
 }
 
 qmean () {
-		vsearch --quiet --fastq_stats $1 -fastq_qmin 0 -fastq_qmax 60 -fastq_ascii 33 --log - | sed -n '/^ASCII/,/^    L/p' | head -n -2 | awk 'NR>2{qn+=$2*$4;n+=$4}END{printf "%0.1f\n", qn/n}'
+	vsearch --quiet --fastq_stats $1 -fastq_qmin 0 -fastq_qmax 60 -fastq_ascii 33 --log - | sed -n '/^ASCII/,/^    L/p' | head -n -2 | awk 'NR>2{qn+=$2*$4;n+=$4}END{printf "%0.1f\n", qn/n}'
 }
 export -f qmean
 
@@ -147,18 +144,11 @@ DEBUG=0
 NCPUS=1
 
 # get options
-while getopts ":a:bc:d:e:fg:hjl:m:n:o:p:qr:t:x:" opt
+while getopts ":bc:d:e:fg:hjl:m:n:o:p:qr:t:x:" opt
 do
 	case $opt in
 		h)	show_help | fmt -s -w $(tput cols)
 			exit 0;;
-		a)	if [ "${OPTARG}" == "RELAX" ]
-			then
-				ALIGN="-g -2 -e -1 -m 3 -n -2"
-			elif [ "${OPTARG}" != "DEFAULT" ]
-			then
-				error_help "wrong parameter for option -a"
-			fi ;;
 		b)	DEBUG=1;;
 		c)	CONSP="${OPTARG}";;
 		d)	DB="${OPTARG}"
@@ -516,7 +506,10 @@ do
 		cat info.$i.$j.$x.${CELL[$pos]} info.$i.$j.$x.${CELL[$rev]} > info.$i.$j.$x.$pname
 		rm info.$i.$j.$x.${CELL[$pos]} info.$i.$j.$x.${CELL[$rev]}
 		
-		# pair end merge with NGmerge using cut sequences (keep bad quality potentially removed by sickle): only the overlapping part is kept
+		# control that both sequences are available
+		
+		
+		# pair end merge with NGmerge using cut sequences (keep bad quality potentially removed by trimming): only the overlapping part is kept
 		seqkit seq -rpv -t dna $rev.cut.fq > $rev.cut.r.fq
 		NGmerge -1 $pos.cut.fq -2 $rev.cut.r.fq -o $pname.pair.fq -d -v -p $MISM -q 33 -u 60 -w $BTK/utils/qual_profile.60.txt 2>> log.$pname.txt # use own quality profile for 0 to 60 Phred score
 				
@@ -557,10 +550,6 @@ do
 		rm $i.$j.$x.${CELL[$pos]}.trim.fa $i.$j.$x.${CELL[$rev]}.trim.fa
 		
 		printf "%s pair of sequences from %s and %s\n\tpaired using %s, sequence length %s nt\n\n" ${SAM[$pos]} ${AB[$pos]} ${AB[$rev]} "$PAIR" $(seqkit stat -T $i.$j.$x.$pname.trim.fa | sed '1d' | cut -f 5) >> info.$i.$j.$x.$pname
-		
-		#tracy assemble -t 0 -p $PEAK $ALIGN -a fastq -o $pname.ass $DIR/${AB[$rev]} $DIR/${AB[$pos]} > log.$pname.txt
-		
-		#tracy consensus -q 0 -u 0 -r 0 -s 0 -p $PEAK $ALIGN -b $pname -o $pname.pair $DIR/${AB[$pos]} $DIR/${AB[$rev]} > log.$name.txt
 		
 	done < <(grep pair pairs)
 	
