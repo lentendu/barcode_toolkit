@@ -114,6 +114,7 @@ BTK=$(dirname $(readlink -f $(dirname "$0")))
 ALG=megablast
 QCOV=60
 DB=nt
+REMOTE=T
 ID=80
 NCPUS=1
 SEN=95
@@ -130,8 +131,8 @@ do
 		a)	ALG=${OPTARG};;
 		b)	BLAST=$(readlink -f ${OPTARG});;
 		c)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 10")" )) && (( "$(bc <<<"${OPTARG} <= 100")" )); then QCOV=${OPTARG} ; else error_help "value provided to option -c should be a number between 10 and 100, not ${OPTARG}" ; fi ;;
-		d)	DB="${OPTARG}" ; if [[ ${DB} == *"/"* ]] ; then if [ ! -d "${DB%/*}" ] ; then error_help "the directory (${DB%/*}) in the path to the database provided to -d option does not exist" ; elif [ ! -f "${DB}.ndb" ] && [ ! -f "${DB}.nal" ] ; then error_help "there is no database with prefix ${DB##*/} in the directory ${DB%/*}" ; fi ; else REMOTE=T ; fi ;;
-		e)	EX=" NOT(((environmental samples[organism] OR metagenomes[orgn] OR txid32644[orgn]) AND 1[PCNT]) OR env [DIV])";;
+		d)	DB="${OPTARG}" ; if [[ ${DB} == *"/"* ]] ; then if [ ! -d "${DB%/*}" ] ; then error_help "the directory (${DB%/*}) in the path to the database provided to -d option does not exist" ; elif [ ! -f "${DB}.ndb" ] && [ ! -f "${DB}.nal" ] ; then error_help "there is no database with prefix ${DB##*/} in the directory ${DB%/*}" ; else REMOTE=F ; fi ; else REMOTE=T ; fi ;;
+		e)	EX=" NOT(((environmental samples[organism] OR metagenomes[orgn] OR txid32644[orgn]) AND 1[PCNT]) OR env[DIV])";;
 		f)	FILE=$(readlink -f ${OPTARG});;
 		i)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 50")" )) && (( "$(bc <<<"${OPTARG} <= 100")" )); then ID=${OPTARG} ; else error_help "value provided to option -i should be a number between 50 and 100, not ${OPTARG}" ; fi ;;
 		k)	KEEP=1;;
@@ -193,7 +194,7 @@ then
 	if [ $NBS -le 10 ] ; then NCPUS=1 ; elif [ $NCPUS -gt $NBS ] ; then NCPUS=$NBS ; fi # cap nb of CPUS to 1 if less than 10 sequences or to nb of sequences if fewer sequences than nb CPUS
 	if [ -z "$BLAST" ]
 	then
-		if [ -z "$REMOTE" ]
+		if [ $REMOTE == "F" ]
 		then
 			# local blastn: provide one block of sequence at a time to blastn and parallelize, much faster than using blastn --num_threads
 			if [ -z "$QUERY" ]
