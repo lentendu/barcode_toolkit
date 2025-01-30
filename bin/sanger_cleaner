@@ -367,6 +367,9 @@ do
 				then
 					seqkit grep -sr -p '^[ATCGN]*$' ${REF[$k]} | seqkit grep -nr -p "$x" | seqkit head -n 1 -w0  > ref.$k.fasta
 				fi
+			elif [ $(seqkit stat -T ${REF[$k]} | sed '1d' | cut -f 4) -eq 1 ]
+			then
+				ln -s ${REF[$k]} ref.$k.fasta
 			fi
 		# fetch genbank to create reference sequence
 		elif [ ! -z "$DJIIN" ]
