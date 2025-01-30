@@ -45,6 +45,8 @@ echo "PATH=\$PATH:$PWD/barcode_toolkit/bin" >> ~/.bashrc
 
 **consensus_blast** is a tool for automatic BLAST of multiple sequences and creating a consensus taxonomy from a range of best matches.
 
+**consensus_vsearch** is a tool for taxonomic assignment using vsearch --usearch_global option and creating a consensus taxonomy from a range of best matches.
+
 **nanobass** is a tool to assemble barcoding Nanopore sequences.
 
 **primcheck** is a tool to perform in-silico PCR and evaluate primer pairs performance to amplify a target clade.
