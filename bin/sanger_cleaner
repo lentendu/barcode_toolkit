@@ -25,7 +25,7 @@ Options
 		single-quoted list of parameters for the consensus blast; clade and gene from the input table can be used to build the query, and are accessed with %c and %g; for example, '-e -q "%c[Organism] AND %g"'; off by default (i.e., use consensus_blast default parameters)
 	
 	-d DB
-		genbank database to blast against; for local database, provide full path to database prefix (e.g. $HOME/databases/nt), otherwise perform remote blastn ; this will perform consensus_blast per clade and gene;  consensus_blast default parameters can be changed with option -c; default: nt
+		genbank database to blast against or UDB formated database for vsearch based taxonomic identification; for local database, provide full path to database prefix (e.g. $HOME/databases/nt), otherwise perform remote blastn ; this will perform consensus_blast per clade and gene; consensus_blast default parameters can be changed with option -c; default: nt
 	
 	-e ERROR
 		error rate for cutadapt amount of mismatch(es) allowed to detect and remove primers; default: 0.2
@@ -59,6 +59,8 @@ Options
 	
 	-t TRIM
 		minimum average quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect bases allowed) ; default: 30
+	
+	-v 	use consensus_vsearch instead of consensus_blast for consensus taxonomic assignment; default off
 			
 	-x TAXDUMP
 		full path to taxdump for consensus_blast
@@ -132,7 +134,6 @@ EXEC=$PWD
 BTK=$(dirname $(readlink -f $(dirname "$0")))
 
 # Option's default value
-ALIGN="-g -10 -e -4 -m 3 -n -5"
 ERR=0.2
 FORCE=F
 MISM=0.4
