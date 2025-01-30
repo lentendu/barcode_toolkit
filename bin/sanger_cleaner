@@ -22,7 +22,7 @@ Options
 	-b debug on, avoid deleting temporay directory
 	
 	-c consensus_blast_PARAMETER
-		single-quoted list of parameters for the consensus blast; clade from the input table can be used to build the query, and is accessed with %c, for example, '-e -q "%c[Organism]"'; off by default (i.e., use consensus_blast default parameters)
+		single-quoted list of parameters for the consensus blast; clade and gene from the input table can be used to build the query, and are accessed with %c and %g; for example, '-e -q "%c[Organism] AND %g"'; off by default (i.e., use consensus_blast default parameters)
 	
 	-d DB
 		genbank database to blast against; for local database, provide full path to database prefix (e.g. $HOME/databases/nt), otherwise perform remote blastn ; this will perform consensus_blast per clade and gene;  consensus_blast default parameters can be changed with option -c; default: nt
@@ -578,7 +578,7 @@ do
 	# BLAST
 	if [ ! -z "$DB" ]
 	then
-		if [ ! -z "$CONSP" ] ; then CONSO=$(echo "$CONSP" | sed "s/%c/$x/") ; fi
+		if [ ! -z "$CONSP" ] ; then CONSO=$(echo "$CONSP" | sed "s/%c/$x/;s/%g/$j/") ; fi
 		if [ "$DEBUG" == 1 ] ; then CDEBUG=" -k" ; fi
 		COMM="consensus_blast -n $NCPUS $CONSO$CDEBUG$TDB -d $DB -o $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.hits_blast.tsv $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fasta > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv"
 		eval "$COMM"
