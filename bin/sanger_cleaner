@@ -308,7 +308,7 @@ declare -A PROJECT
 while read proj gen cla pos
 do
 	PROJECT["$proj","$gen","$cla"]="$pos"
-done < <(cat <(echo ${PROJ[@]}) <(echo ${GENE[@]}) <(echo ${CLADE[@]}) | transpose | awk '{print $0,NR-1}' | sort -k 1,1 -k 2,2 -k 3,3 -k 4,4n | awk '{if(NR==1){p=$1;g=$2;c=$3;printf "%s %s %s %s",p,g,c,$4} else {if($1==p && $2==g && $3==c){printf " %s",$4} else {printf "\n%s %s %s %s",$1,$2,$3,$4;p=$1;g=$2;c=$3}}}END{printf "\n"}')
+done < <(cat <(echo ${PROJ[@]}) <(echo ${GENE[@]}) <(echo ${CLADE[@]}) | $BTK/utils/transpose | awk '{print $0,NR-1}' | sort -k 1,1 -k 2,2 -k 3,3 -k 4,4n | awk '{if(NR==1){p=$1;g=$2;c=$3;printf "%s %s %s %s",p,g,c,$4} else {if($1==p && $2==g && $3==c){printf " %s",$4} else {printf "\n%s %s %s %s",$1,$2,$3,$4;p=$1;g=$2;c=$3}}}END{printf "\n"}')
 
 # loop over project, gene and clade
 for h in ${!PROJECT[@]}
