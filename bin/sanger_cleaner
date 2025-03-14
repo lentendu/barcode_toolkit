@@ -598,13 +598,6 @@ do
 		cat $i.$j.$x.*trim.fq > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fastq
 	fi
 	
-	# output pairwise sequence similarity
-	if [ ! -z "$SIM" ]
-	then
-		cat $EXEC/sanger_cleaner.$OUTPUT/*.${DIR##*/}.fasta | seqkit seq -g | sed 's/;orga.*//' > allseq.fasta
-		vsearch --threads $NCPUS --usearch_global allseq.fasta --db allseq.fasta -self --id $SIM --iddef 2 --userout - -userfields query+target+id2 --maxaccepts 0 --query_cov 0.8 --maxhits 48 | sort -t $'\t' -k 1,1 -k 2,2 > $EXEC/sanger_cleaner.$OUTPUT/${DIR##*/}.pairwise_similarity.txt
-	fi
-	
 	# BLAST
 	if [ ! -z "$DB" ]
 	then
@@ -618,5 +611,12 @@ do
 		sed 's/|None\t/\t/;s/|None\t/\t/' $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv | awk -v p=$PARAM 'BEGIN{FS=OFS="\t"; l=split(p,P,"#")}{if(NR==1){for(i=1;i<=l;i++){sub("$","\t"P[i],$1)}; sub("consensus_taxonomy","consensus_organism\tconsensus_taxonomy")} else {split("",param);m=split($1,a,";");for(i=2;i<=m;i++){split(a[i],b,"=");param[b[1]]=b[2]};sub(";.*","",$1);for(i=1;i<=l;i++){sub("$","\t"param[P[i]],$1)}; n=split($4,t,"|"); sub("^",t[n]"\t",$4)}; print}' > tmp.$i.$j.$x && mv tmp.$i.$j.$x $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.${DB##*/}.blast.tsv
 	fi
 done
+
+# output pairwise sequence similarity
+if [ ! -z "$SIM" ]
+then
+	cat $EXEC/sanger_cleaner.$OUTPUT/*.${DIR##*/}.fasta | seqkit seq -g | sed 's/;orga.*//' > allseq.fasta
+	vsearch --threads $NCPUS --usearch_global allseq.fasta --db allseq.fasta -self --id $SIM --iddef 2 --userout - -userfields query+target+id2 --maxaccepts 0 --query_cov 0.8 --maxhits 48 | sort -t $'\t' -k 1,1 -k 2,2 > $EXEC/sanger_cleaner.$OUTPUT/${DIR##*/}.pairwise_similarity.txt
+fi
 
 finish $DEBUG
