@@ -385,7 +385,7 @@ do
 		then
 			CUT=$fwdn.$rvsn
 			# use reverse complement reference sequence found for forward for reverse sequences
-			if [ "${SEQDIR[$k]}" == "reverse" ] && [ -s $x.$j.$rvsn.$fwdn.fasta ]
+			if [ "${SEQDIR[$k]}" == "reverse" ] && [ -s $x.$j.$rvsn.$fwdn.fasta ] && [ ! -f $x.$j.$CUT.fasta ]
 			then
 				ln -s $x.$j.$rvsn.$fwdn.fasta $x.$j.$CUT.fasta
 			fi
@@ -533,34 +533,24 @@ do
 		
 		# pair end merge with NGmerge using cut sequences (keep bad quality potentially removed by trimming): only the overlapping part is kept
 		seqkit seq -rpv -t dna $rev.cut.fq > $rev.cut.r.fq
-		NGmerge -1 $pos.cut.fq -2 $rev.cut.r.fq -o $pname.pair.fq -d -v -p $MISM -q 33 -u 60 -w $BTK/utils/qual_profile.60.txt 2>> log.$pname.txt # use own quality profile for 0 to 60 Phred score
-				
+		NGmerge -1 $pos.cut.fq -2 $rev.cut.r.fq -o $pname.pair.fq -d -v -p $MISM -q 33 -u 60 -w $BTK/utils/qual_profile.60.txt -c dov.$pname 2>> log.$pname.txt # use own quality profile for 0 to 60 Phred score
+		
 		if [ -s $pname.pair.fq ]
 		then
+			# add dovetails to merged sequence ends
+			if [ $(sed -n '$=' dov.$pname) -gt 1 ]
+			then
+				read DF DR < <(sed '1d' dov.$pname | cut -f 2-3)
+				DF=${DF//-/}
+				DR=${DR//-/}
+				if [ ${#DF} -gt 0 ] ; then DFQ=$(sed -n '4p' $pos.cut.fq | rev | cut -c 1-${#DF} | rev) ; else DFQ="" ; fi
+				if [ ${#DR} -gt 0 ] ; then DR=$(sed -n '2p' $rev.cut.fq | cut -c 1-${#DR}) ; DRQ=$(sed -n '4p' $rev.cut.fq | cut -c 1-${#DR}) ; else DRQ="" ; fi
+				sed "2{s/^/$DR/;s/$/$DF/}; 4{s/^/$DRQ/;s/$/$DFQ/}" $pname.pair.fq > tmp.$pname && mv tmp.$pname $pname.pair.fq
+			fi
 			QUAL=$(qmean $pname.pair.fq)
 			PAIR=NGmerge
-			# keep assemble region, but force bad quality nucleotide if found in both reads
-			cat $pos.cut.fq $rev.cut.fq $pname.pair.fq | seqkit fq2fa | ginsi --quiet - | goalign consensus 2>/dev/null | seqkit seq -w0 -g > $pname.cons.fa
-			# add 3'-ends (dovetail) overhangs if any
-			cat $pos.trim.fq $rev.trim.fq | seqkit fq2fa | cat - $pname.cons.fa | ginsi --quiet - | seqkit seq -w0 -u > $pname.pair.ali
-			seqkit range -r -1:-1 $pname.pair.ali | goalign stats --per-sequences 2> /dev/null > $pname.ends
-			GS=$(sed '1d' $pname.ends | cut -f 3)
-			GE=$(sed '1d' $pname.ends | cut -f 4)
-			if [ $GS -gt 0 ]
-			then
-				if [ $GE -gt 0 ]
-				then
-					paste -d "" <(seqkit range -r 2:2 $pname.pair.ali | seqkit subseq -w0 -r 1:$GS) $pname.cons.fa <(seqkit head -n 1 $pname.pair.ali | seqkit subseq -w0 -r -$GE:-1) | sed 's/^\(>[^>]*\).*/\1/' > $pname.tmp.fa
-				else
-					paste -d "" <(seqkit range -r 2:2 $pname.pair.ali | seqkit subseq -w0 -r 1:$GS) $pname.cons.fa | sed 's/^\(>[^>]*\).*/\1/' > $pname.tmp.fa
-				fi
-			elif [ $GE -gt 0 ]
-			then
-				paste -d "" $pname.cons.fa <(seqkit subseq -w0 -r -$GE:-1 $i.$j.$x.${CELL[$pos]}.trim.fa 2> /dev/null) > $pname.tmp.fa
-			else
-				ln -s $pname.cons.fa $pname.tmp.fa
-			fi
-			tail -1 $pname.tmp.fa | cat <(sed -n "1{s/^[^;]*;/>$pname;/;s/;\([^;]*\)$/;${SEQDIR[$pos]}_seq_\1/;p}" $i.$j.$x.${CELL[$pos]}.trim.fa | paste -d ";" - <(sed -n "1{s/^.*;\([^;]*\)$/${SEQDIR[$rev]}_seq_\1;paired=NGmerge/;p}" $i.$j.$x.${CELL[$rev]}.trim.fa)) - > $i.$j.$x.$pname.trim.fa
+			seqkit fq2fa $pname.pair.fq > $pname.pair.fa
+			tail -1 $pname.pair.fa | cat <(sed -n "1{s/^[^;]*;/>$pname;/;s/;\([^;]*\)$/;${SEQDIR[$pos]}_seq_\1/;p}" $i.$j.$x.${CELL[$pos]}.trim.fa | paste -d ";" - <(sed -n "1{s/^.*;\([^;]*\)$/${SEQDIR[$rev]}_seq_\1;paired=NGmerge/;p}" $i.$j.$x.${CELL[$rev]}.trim.fa)) - > $i.$j.$x.$pname.trim.fa
 		else
 			PAIR="consensus"
 			# Consensus:  if not same base, chose base with higher quality by a margin of 10 or more or replace by N
