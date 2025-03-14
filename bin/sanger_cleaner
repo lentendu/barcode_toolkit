@@ -14,7 +14,7 @@ Description
 	sanger cleaner perform basecalling, alignment against a reference sequence or primer removal, quality trimming and eventually pair-end assembly of Sanger sequences.
 
 Usage
-	$0 [-hbfjqv] [-c 'consensus_blast_parameter'] [-d db] [-e error] [-g mismatch] [-l maxlength] [-m minlength] [-n ncpus] [-p peak] [-t trim] [-x taxdump] -r directory -o output_directory input_table
+	$0 [-hbfjqv] [-c 'consensus_blast_parameter'] [-d db] [-e error] [-g mismatch] [-l maxlength] [-m minlength] [-n ncpus] [-p peak] [-s sim] [-t trim] [-x taxdump] -r directory -o output_directory input_table
 
 Options
 	-h	show this help
@@ -56,6 +56,9 @@ Options
 		
 	-r RAW_DIRECTORY
 		path to directory containing raw ab1 files
+	
+	-s SIM
+		output pairwise sequences similarities above the provided SIM similarity threshold (float number between 0.5 and 1.0, advised 0.97); helpfull to detect cross contaminations and/or group sequences into OTUs
 	
 	-t TRIM
 		minimum average quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect bases allowed) ; default: 30
@@ -145,7 +148,7 @@ DEBUG=0
 NCPUS=1
 
 # get options
-while getopts ":bc:d:e:fg:hjl:m:n:o:p:qr:t:x:" opt
+while getopts ":bc:d:e:fg:hjl:m:n:o:p:qr:s:t:x:" opt
 do
 	case $opt in
 		h)	show_help | fmt -s -w $(tput cols)
@@ -189,6 +192,12 @@ do
 			else
 				error_help "# Directory for option -d not found: ${OPTARG}"
 			fi;;
+		s)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} >= 0.5")" )) && (( "$(bc <<<"${OPTARG} <= 1")" ))
+			then
+				SIM=${OPTARG}
+			else
+				error_help "value provided to option -s should be a float number between 0 and 1, not ${OPTARG}"
+			fi ;;
 		t)	TRIM=${OPTARG};;
 		x)	TDB=" -x ${OPTARG}";;
 		\?)	error_help "# Invalid option: -${OPTARG}";;
@@ -583,9 +592,17 @@ do
 		continue
 	fi
 	
+	# output fastq files
 	if [ ! -z "$FASTQ" ]
 	then
 		cat $i.$j.$x.*trim.fq > $EXEC/sanger_cleaner.$OUTPUT/$i.$j.$x.${DIR##*/}.fastq
+	fi
+	
+	# output pairwise sequence similarity
+	if [ ! -z "$SIM" ]
+	then
+		cat $EXEC/sanger_cleaner.$OUTPUT/*.${DIR##*/}.fasta | seqkit seq -g | sed 's/;orga.*//' > allseq.fasta
+		vsearch --threads $NCPUS --usearch_global allseq.fasta --db allseq.fasta -self --id $SIM --iddef 2 --userout - -userfields query+target+id2 --maxaccepts 0 --query_cov 0.8 --maxhits 48 | sort -t $'\t' -k 1,1 -k 2,2 > $EXEC/sanger_cleaner.$OUTPUT/${DIR##*/}.pairwise_similarity.txt
 	fi
 	
 	# BLAST
