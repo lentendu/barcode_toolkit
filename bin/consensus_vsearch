@@ -41,7 +41,7 @@ Options
 		pairwise identity definition between 0 and 4 (see vsearch manual); default: 2
 	
 	-s SENSITIVITY
-		consensus sensitivity S, a power index between 0 and 1 to control the minimum identity rate to keep sequences for consensus taxonomy construction following the formula: maxid+1-(100-maxid+1)^S; default: 0.5
+		consensus sensitivity S, a power index between 0.01 and 1 to control the minimum identity rate to keep sequences for consensus taxonomy construction following the formula: maxid+1-(100-maxid+1)^S; default: 0.5
 	
 	-t TARGET
 		maximum number of target sequences to keep for consensus; default: 32
@@ -106,7 +106,7 @@ do
 		n)	NCPUS="${OPTARG}";;
 		o)	OUT=$(readlink -f ${OPTARG});;
 		p)	IDDEF="${OPTARG}";;
-		s)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} >= 0.5")" )) && (( "$(bc <<<"${OPTARG} <= 1")" )); then SEN=${OPTARG} ; else error_help "value provided to option -s should be a number between 0.5 and 1, not ${OPTARG}" ; fi ;;
+		s)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} >= 0.01")" )) && (( "$(bc <<<"${OPTARG} <= 1")" )); then SEN=${OPTARG} ; else error_help "value provided to option -s should be a number between 0.01 and 1, not ${OPTARG}" ; fi ;;
 		t)	NTARG=${OPTARG};;
 		\?)	error_help "# Invalid option: -${OPTARG}";;
 		:)	error_help "# Option -${OPTARG} requires an argument.";;
