@@ -30,12 +30,18 @@ Options
 	
 	-g kingdom
 		value for barrnap --kingdom option, either euk, arc, bac or mito; default: euk
-
+	
+	-j THREADS
+		number of CPU threads; default: 1
+	
 	-k KIT
 		barcoding kit, RBK for rapid barcoding kit or NBD for native barocding kit; default: NBD
 
 	-l LOW_COVERAGE
 		lowest coverage for keeping a position / a consensus sequence if the desired coverage (-c) cannot retrive at least one contig; default: 20
+	
+	-m model
+		medaka model depending on nanopore kit version and basecaller; default: r1041_e82_400bps_hac_v4.2.0
 	
 	-o OUTPUT_DIR
 		output directory; default: nanobass.name.XXXXXXXX , with name being the basename of the input directory or filename without extension
@@ -45,8 +51,11 @@ Options
 	
 	-r	predict rRNA with barrnap; off by default
 	
-	-t THREADS
-		number of CPU threads; default: 2
+	-s SIZE
+		approximate size of the amplicon; default: automaticaly guessed (97th percentile for RBK; average sequence length with strict primer pair matching for NBD)
+	
+	-t THRESHOLD
+		RATTLE minimum score threshold to cluster reads; default: 0.9
 
 EOF
 }
@@ -65,7 +74,7 @@ finish(){
 	if [ "$1" -eq 1 ]
 	then
 		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
-		ln -s $BTK/utils/load_env $PWD
+		ln -f -s $BTK/utils/load_env $PWD
 		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
 		>&2 echo "cd $TMP && source ./load_env"
 	fi	
@@ -84,13 +93,16 @@ BTK=$(dirname $(readlink -f $(dirname "$0")))
 DEBUG=0
 COV=50
 MODE=COV
+MODEL=r1041_e82_400bps_hac_v4.2.0
 LOWC=20
 KIT=NBD
 KING=euk
-NCPUS=2
+NCPUS=1
+SIZE=auto
+THRESHOLD=0.9
 
 # get options
-while getopts ":bcf:hk:l:o:p:rt:" opt
+while getopts ":bc:fg:hj:k:l:m:o:p:rs:t:" opt
 do
 	case $opt in
 		h)	show_help | fmt -s -w $(tput cols)
@@ -99,12 +111,15 @@ do
 		c)	COV="${OPTARG}";;
 		f)	FORCE=yes;;
 		g)	[[ "euk arc bac mito" =~ (^|[[:space:]])${OPTARG}($|[[:space:]]) ]] && KING="${OPTARG}" ||  error help "# invalid value for option -g: ${OPTARG}" ;;
+		j)	NCPUS="${OPTARG}";;
 		k)	[[ "RBK NBD" =~ (^|[[:space:]])${OPTARG}($|[[:space:]]) ]] && KIT="${OPTARG}" ||  error help "# invalid value for option -k: ${OPTARG}" ;;
 		l)	LOWC="${OPTARG}";;
+		m)	MODEL="${OPTARG}";;
 		o)	OUTD="${OPTARG}";;
 		p)	if [ -f "${OPTARG}" ] ; then PRIM=$(readlink -f "${OPTARG}") ; else error help "primer file ${OPTARG} not found" ; fi ;;
 		r)	RRNA=yes;;
-		t)	NCPUS="${OPTARG}";;
+		s)	SIZE="${OPTARG}";;
+		t)	THRESHOLD="${OPTARG}";;
 		\?)	error help "# Invalid option: -${OPTARG}";;
 		:)	error help "# Option -${OPTARG} requires an argument.";;
 	esac
@@ -122,14 +137,19 @@ then
 		error help "input directory $1 does not contain fastq or fastq.gz files"
 	fi
 	RAWDIR=$(readlink -f "$1")
-	RAWFQ=$(find $RAWDIR -type f -name "*.fastq*")
+	RAWFQ=($(find $RAWDIR -type f -name "*.fastq*" | sed 's|.*/||' | sort))
+	if [ -z "$RAWFQ" ]
+	then
+		error_help "no fastq files found in input directory $RAWDIR"
+	fi
 	BC=$(basename $RAWDIR)
 elif [ -f "$1" ]
 then
 	if [ -s "$1" ] 
 	then
-		RAWFQ=$(readlink -f "$1")
-		BC=$(basename $RAWFQ | sed 's/\.fastq.*$//')
+		RAWDIR=$(dirname $(readlink -f "$1"))
+		RAWFQ=($(basename $(readlink -f "$1")))
+		BC=$(echo ${RAWFQ[@]} | sed 's/\.fastq.*$//')
 	else
 		error help "input file $1 is empty"
 	fi
@@ -137,13 +157,13 @@ else
 	error help "input is neither a file or a directory directory $1 not found. Check path and try again ;)"
 fi
 
-if [[ "$RAWFQ" == *".gz" ]]
+if [[ "${RAWFQ[@]}" == *".gz" ]]
 then
 	decomp () { gunzip -ck $@ ; }
 else
 	decomp () { cat $@ ; }
 fi
-
+export -f decomp
 
 # output directory
 if [ -z "$OUTD" ]
@@ -179,88 +199,107 @@ export TMP
 cd $TMP
 
 
-# detect and remove primers, split double sequence if any, only use fragment between two primers of minimum 20% raw length, and in a 20% range of the expected length
+# Native Barcoding Kit: detect and remove primers, split double sequence if any, only use fragment between two primers of minimum 20% raw length, and in a 20% range of the expected length
 if [ $KIT == "NBD" ] && [ ! -z "$PRIM" ]
 then
 	read FWDN FWD RVSN RVS <<< $(sed 's/^>//' "$PRIM" | tr "\n" " ")
 	FWDRC=$(echo -e ">a\n$FWD" | seqkit seq -rpv -t dna| tail -1)
 	RVSRC=$(echo -e ">a\n$RVS" | seqkit seq -rpv -t dna| tail -1)
+	FDIFFS=$(printf "%0.2f\n" $(bc -l <<< "2/${#FWD}+0.05")) # allow until 2 mismatches on the primer sequences
+	RDIFFS=$(printf "%0.2f\n" $(bc -l <<< "2/${#RVS}+0.05"))
 	# locate primers
-	decomp $RAWFQ | cutadapt -j $NCPUS -b "fwd=$FWD;o=$((${#FWD}*3/4))" -b "rvs=$RVS;o=$((${#RVS}*3/4))" -b "rvs_rc=$RVSRC;o=$((${#RVS}*3/4))" -b "fwd_rc=$FWDRC;o=$((${#FWD}*3/4))" -e 0.1 -n 5 --info-file=pos.tsv --action=none - > /dev/null 2> log.cutadapt # start positions in bed file is 0-base so keep cutadapt output as is, but need to add 1 to end position which is 1-base in bed file
-	awk 'BEGIN{FS=OFS="\t"} NF>4{sub(" .*","",$1);print $1,$8,$3+1,$4+1}' pos.tsv | sort -k 1,1 | join <(seqkit fx2tab -nil $RAWFQ | sort -k 1,1) - | sort -k 1,1 -k 4,4n | awk 'func pos(m,l) {n=m/l*100; if(n<10) return "s"; else if(n<30) return "p"; else if(n<70) return "h"; else if(n<=100) return "l"} ; {if(NR==1){p=$1;L=$2;e=$5;printf "%s %s %s %s",p,L,pos($4,L),$3} else {if($1==p){printf " %s %s",pos($4-e,L),$3;e=$5} else {printf " %s\n%s %s %s %s",pos(L-e,L),$1,$2,pos($4,$2),$3;p=$1;L=$2;e=$5}}}END{printf " %s\n",pos(L-e,L)}' > primer_pattern_lookup
-	awk 'BEGIN{FS=OFS="\t"} NF>4{sub(" .*","",$1);print $1,$8,$3,$4+1}' pos.tsv | sort -k 1,1 | join <(seqkit fx2tab -nil $RAWFQ | sort -k 1,1) - | sort -k 1,1 -k 4,4n | awk '{if(NR==1){p=$1;L=$2;e=$5;printf "%s %s %s %s:%s-%s",p,L,int($4/L*100),$3,$4,$5} else {if($1==p){printf " %s %s:%s-%s",int(($4-e)/L*100),$3,$4,$5;e=$5} else {printf " %s\n%s %s %s %s:%s-%s",int((L-e)/L*100),$1,$2,int($4/$2*100),$3,$4,$5;p=$1;L=$2;e=$5}}}END{printf " %s\n",int((L-e)/L*100)}' > primer_pattern
+	parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | cutadapt -j $NCPUS -b "fwd=$FWD;o=$((${#FWD}*3/4))" -b "rvs=$RVS;o=$((${#RVS}*3/4))" -b "rvs_rc=$RVSRC;o=$((${#RVS}*3/4))" -b "fwd_rc=$FWDRC;o=$((${#FWD}*3/4))" -e 0.1 -n 5 --info-file=pos.tsv --action=none - > /dev/null 2> log.cutadapt # start positions in bed file is 0-base so keep cutadapt output as is, but need to add 1 to end position which is 1-base in bed file
+	awk 'BEGIN{FS=OFS="\t"} NF>4{sub(" .*","",$1);print $1,$8,$3+1,$4+1}' pos.tsv | sort -k 1,1 | join <(parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit fx2tab -nil | sort -k 1,1) - | sort -k 1,1 -k 4,4n | awk 'function pos(m,l) {n=m/l*100; if(n<10) return "s"; else if(n<30) return "p"; else if(n<70) return "h"; else if(n<=100) return "l"} ; {if(NR==1){p=$1;L=$2;e=$5;printf "%s %s %s %s",p,L,pos($4,L),$3} else {if($1==p){printf " %s %s",pos($4-e,L),$3;e=$5} else {printf " %s\n%s %s %s %s",pos(L-e,L),$1,$2,pos($4,$2),$3;p=$1;L=$2;e=$5}}}END{printf " %s\n",pos(L-e,L)}' > primer_pattern_lookup
+	awk 'BEGIN{FS=OFS="\t"} NF>4{sub(" .*","",$1);print $1,$8,$3,$4+1}' pos.tsv | sort -k 1,1 | join <(parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit fx2tab -nil | sort -k 1,1) - | sort -k 1,1 -k 4,4n | awk '{if(NR==1){p=$1;L=$2;e=$5;printf "%s %s %s %s:%s-%s",p,L,int($4/L*100),$3,$4,$5} else {if($1==p){printf " %s %s:%s-%s",int(($4-e)/L*100),$3,$4,$5;e=$5} else {printf " %s\n%s %s %s %s:%s-%s",int((L-e)/L*100),$1,$2,int($4/$2*100),$3,$4,$5;p=$1;L=$2;e=$5}}}END{printf " %s\n",int((L-e)/L*100)}' > primer_pattern
 	awk 'BEGIN{OFS="\t"}{for(i=3;i<=NF;i+=2){if($i>20){if(i==3){j=gensub(".*:","","g",$(i+1)); print $1,"-","1",gensub("-.*","","g",j)-1, gensub(":.*","","g",$(i+1))} else {if(i==NF){print $1,gensub(":.*","","g",$(i-1)),gensub(".*-","","g",$(i-1))+1, $2, "-"} else {j=gensub(".*:","","g",$(i+1)); print $1,gensub(":.*","","g",$(i-1)),gensub(".*-","","g",$(i-1))+1,gensub("-.*","","g",j)-1, gensub(":.*","","g",$(i+1))}}}}}' primer_pattern > primer_str
-	# expected size : need to allow for length variability (paralogs, untargeted contaminant ortologs)
-	read LFR MFR <<< $(awk '$2=="fwd" && $5=="rvs_rc"{c+=1;l=$4-$3;m+=l-l/5;M+=l+l/5}END{print int(m/c),int(M/c)}' primer_str)
+	# expected size : need to allow for length variability (paralogs, untargeted contaminant ortologs), TO DO: variability around median not mean
+	if [ "$SIZE" == "auto" ]
+	then
+		read LFR MFR <<< $(awk '$2=="fwd" && $5=="rvs_rc"{print $4-$3}' primer_str | sort -n | awk '{a[NR]=$1;c+=$1}END{m=c/FNR; print int(a[int(FNR/3)]-m/5), int(a[int(FNR*2/3)]+m/5)}')
+		GS=$(awk '$2=="fwd" && $5=="rvs_rc"{c+=1;l+=$4-$3}END{printf "%.1f\n", l/c/1000}' primer_str)
+	else
+		read LFR MFR <<< $(echo $((SIZE-(SIZE/4))) $((SIZE+(SIZE/4))))
+		GS=$(echo "scale=1 ; $SIZE / 1000" | bc)
+	fi
 	# strict match of high quality expected sequence(s) in forward direction only, clustered and aligned for hmm profil
-	decomp $RAWFQ | seqkit grep --quiet -f <(grep "fwd [lh] rvs_rc" primer_pattern_lookup | cut -d " " -f 1) | cutadapt -j $NCPUS -g "$FWD;o=$((${#FWD}*4/5))...${RVSRC};o=$((${#RVS}*4/5))" -e 0.1 -m $LFR -M $MFR --max-aer 0.05 - > tmp.fwd.cut 2> log.cut 
+	parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit grep --quiet -f <(grep "fwd [lh] rvs_rc" primer_pattern_lookup | cut -d " " -f 1) | cutadapt -j $NCPUS -g "$FWD;o=$((${#FWD}*4/5));e=$FDIFFS...${RVSRC};o=$((${#RVS}*4/5));e=$RDIFFS" -m $LFR -M $MFR - > tmp.fwd.cut 2> log.cut # --max-aer 0.05
 	if [ -s tmp.fwd.cut ]
 	then
-		# cluster high quality sequence and create hmmer profiles
-		echo "extract sequences in forward direction"
-		seqkit fq2fa tmp.fwd.cut | sed '/>/s/ .*/#fwd/' | seqkit sort --quiet -lr | vsearch --quiet --threads $NCPUS --cluster_smallmem - --id 0.90 --iddef 1 --centroids - | mafft --quiet - | seqkit seq -w0 -u | hmmbuild --cpu $NCPUS --informat afa -n fwd -o /dev/null tmp.fwd.hmm -
-		# nhmmer to detect forward or reverse sequences
-		seqkit fq2fa $RAWFQ | seqkit seq --quiet -i -m $LFR | nhmmer --cpu $NCPUS -E 1e-10 --w_length $MFR -o /dev/null --tblout tmp.tbl tmp.fwd.hmm -
-		# extact matching region with bed format (RC where needed)
-		seqkit subseq --quiet -j $NCPUS --bed <(awk -v l=$LFR -v L=$MFR '$1!~"^#" && $12=="+"{d=$8-$7; if(d>=l && d<=L){print $1"\t"$7"\t"$8}}' tmp.tbl) $RAWFQ | cat - <(seqkit subseq --quiet -j $NCPUS --bed <(awk '$1!~"^#" && $12=="-"{d=$7-$8; if(d>=l && d<=L){print $1"\t"$8"\t"$7}}' tmp.tbl) $RAWFQ | seqkit seq -rpv -t dna) | seqkit seq --quiet -m $LFR -M $MFR | sed '1~4s/:[\.-] *$//' > $BC.init.fastq
+		if [ $(echo "$(seqkit stat -T tmp.fwd.cut | sed '1d' | cut -f 5) > $COV * 10" | bc -l) ]
+		then
+			# if already 10 times more sequences than needed just use cutadapt approach and skip hmm
+			# cutadapt on reverse sequences and reverse complement
+			parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit grep --quiet -f <(grep "s rvs [lh] fwd_rc s" primer_pattern_lookup | cut -d " " -f 1) | cutadapt -j $NCPUS -g "$RVS;o=$((${#RVS}*4/5));e=$RDIFFS...${FWDRC};o=$((${#FWD}*4/5));e=$FDIFFS" -m $LFR -M $MFR - 2>> log.cut | seqkit seq -rpv -t dna | cat tmp.fwd.cut - > $BC.init.fastq # --max-aer 0.05
+		else
+			# cluster high quality sequence and create hmmer profiles
+			echo "extract sequences in forward direction"
+			seqkit fq2fa tmp.fwd.cut | sed '/>/s/ .*/#fwd/' | seqkit sort --quiet -lr | vsearch --quiet --threads $NCPUS --cluster_smallmem - --id 0.90 --iddef 1 --centroids - | mafft --thread $NCPUS --quiet - | seqkit seq -w0 -u | hmmbuild --cpu $NCPUS --informat afa -n fwd -o log.hmm tmp.fwd.hmm -
+			# nhmmer to detect forward or reverse sequences
+			parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit fq2fa --quiet | seqkit seq -g -i -m $LFR | nhmmer --cpu $NCPUS -E 1e-6 --w_length $MFR -o /dev/null --tblout tmp.tbl tmp.fwd.hmm -
+			# extact matching region with bed format (RC where needed)
+			parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit subseq --quiet -j $NCPUS --bed <(awk -v l=$LFR -v L=$MFR '$1!~"^#" && $12=="+"{d=$8-$7; if(d>=l && d<=L){print $1"\t"$7"\t"$8}}' tmp.tbl) | cat - <(parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit subseq --quiet -j $NCPUS --bed <(awk -v l=$LFR -v L=$MFR '$1!~"^#" && $12=="-"{d=$7-$8; if(d>=l && d<=L){print $1"\t"$8"\t"$7}}' tmp.tbl) | seqkit seq -rpv -t dna) | seqkit seq -g -m $LFR -M $MFR | sed '1~4s/:[\.-] *$//' > $BC.init.fastq
+		fi
 	else # reverse sequences
-		read LRF MRF <<< $(awk '$2=="rvs" && $5=="fwd_rc"{c+=1;l=$4-$3;m+=l-l/5;M+=l+l/5}END{print int(m/c),int(M/c)}' primer_str)
-		decomp $RAWFQ | seqkit grep --quiet -f <(grep "s rvs [lh] fwd_rc s" primer_pattern_lookup | cut -d " " -f 1) | cutadapt -j $NCPUS -g "$RVS;o=$((${#RVS}*4/5))...${FWDRC};o=$((${#FWD}*4/5))" -e 0.1 -m $LRF -M $MRF --max-aer 0.05 - > tmp.rvs.cut 2>> log.cut
+		if [ "$SIZE" == "auto" ]
+		then
+			read LRF MRF <<< $(awk '$2=="rvs" && $5=="fwd_rc"{print $4-$3}' primer_str | sort -n | awk '{a[NR]=$1;c+=$1}END{m=c/FNR; print int(a[int(FNR/3)]-m/5), int(a[int(FNR*2/3)]+m/5)}')
+			GS=$(awk '$2=="rvs" && $5=="fwd_rc"{c+=1;l+=$4-$3}END{printf "%.1f\n", l/c/1000}' primer_str)
+		else
+			read LRF MRF <<< $(echo $((SIZE-(SIZE/5))) $((SIZE+(SIZE/5))))
+			GS=$(echo "scale=1 ; $SIZE / 1000" | bc)
+		fi
+		parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit grep --quiet -f <(grep "s rvs [lh] fwd_rc s" primer_pattern_lookup | cut -d " " -f 1) | cutadapt -j $NCPUS -g "$RVS;o=$((${#RVS}*4/5));e=$RDIFFS...${FWDRC};o=$((${#FWD}*4/5));e=$FDIFFS" -m $LRF -M $MRF - > tmp.rvs.cut 2>> log.cut # --max-aer 0.05
 		if [ -s tmp.rvs.cut ]
 		then
 			echo "extract sequences in forward direction"
-			seqkit fq2fa tmp.rvs.cut | sed '/>/s/ .*/#rvs/' | seqkit sort --quiet -lr | vsearch --quiet --threads $NCPUS --cluster_smallmem - --id 0.90 --iddef 1 --centroids - | mafft --quiet - | seqkit seq -w0 -u | hmmbuild --cpu $NCPUS --informat afa -n rvs -o /dev/null tmp.rvs.hmm -
+			seqkit fq2fa tmp.rvs.cut | sed '/>/s/ .*/#rvs/' | seqkit sort --quiet -lr | vsearch --quiet --threads $NCPUS --cluster_smallmem - --id 0.90 --iddef 1 --centroids - | mafft --thread $NCPUS --quiet - | seqkit seq -w0 -u | hmmbuild --cpu $NCPUS --informat afa -n rvs -o /dev/null tmp.rvs.hmm -
 			# nhmmer to detect reverse or forward sequences
-			seqkit fq2fa $RAWFQ | seqkit seq --quiet -i -m $LRF | nhmmer --cpu $NCPUS -E 1e-10 --w_length $MFR -o /dev/null --tblout tmp.tbl tmp.rvs.hmm -
+			parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit fq2fa | seqkit seq --quiet -i -m $LRF | nhmmer --cpu $NCPUS -E 1e-10 --w_length $MFR -o /dev/null --tblout tmp.tbl tmp.rvs.hmm -
 			# extact matching region with bed format (RC where needed)
-			seqkit subseq --quiet -j $NCPUS --bed <(awk -v l=$LFR -v L=$MFR '$1!~"^#" && $12=="+"{d=$8-$7; if(d>=l && d<=L){print $1"\t"$7"\t"$8}}' tmp.tbl) $RAWFQ | seqkit seq -rpv -t dna | cat - <(seqkit subseq --quiet -j $NCPUS --bed <(awk '$1!~"^#" && $12=="-"{d=$7-$8; if(d>=l && d<=L){print $1"\t"$8"\t"$7}}' tmp.tbl) $RAWFQ) | seqkit seq --quiet -m $LRF -M $MRF | sed '1~4s/:[\.-] *$//' > $BC.init.fastq
+			parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit subseq --quiet -j $NCPUS --bed <(awk -v l=$LFR -v L=$MFR '$1!~"^#" && $12=="+"{d=$8-$7; if(d>=l && d<=L){print $1"\t"$7"\t"$8}}' tmp.tbl) | seqkit seq -rpv -t dna | cat - <(parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit subseq --quiet -j $NCPUS --bed <(awk '$1!~"^#" && $12=="-"{d=$7-$8; if(d>=l && d<=L){print $1"\t"$8"\t"$7}}' tmp.tbl)) | seqkit seq --quiet -m $LRF -M $MRF | sed '1~4s/:[\.-] *$//' > $BC.init.fastq
 		else
 			error stop "no reads could be extracted with strict primer matching"
 		fi
 	fi
 	rm pos.tsv primer_* tmp.*
 else
-	# or get rid of too long and too short sequences
-	seqkit seq -m $(printf '%.0f\n' $(echo $GS*100 | bc)) -M $(printf '%.0f\n' $(echo $GS*2000 | bc)) $RAWFQ > $BC.init.fastq
-fi
-
-
-# parameters specific to barcoding kit
-# determine the expected length by using the 90 / 97% percentile length plus 10% 
-# if difference between maxlength and Q90 / Q97 is greater than Q90/2 / Q97/2, use Q90 / Q97 else use max
+	# Rapid Barcoding Kit: get rid of too long and too short sequences
+	if [ "$SIZE" == "auto" ]
+	then
 tileormax () {
 	TIL=$1; shift
-	seqkit fx2tab -iln $(if [ -p /dev/stdin ] ; then cat - ; else echo ${@} ; fi) | sort -n -k 2,2 | awk -v T=$TIL '{all[NR] = $2} END{Q=int(int(all[int(NR*T/100-0.5)]*1.1)/100+0.5)*100 ; if( (all[FNR]-Q) > Q/2) {print Q/1000} else print int(all[FNR]/100)/10 }'
+	seqkit fx2tab -iln | sort -n -k 2,2 | awk -v T=$TIL '{all[NR] = $2} END{Q=int(int(all[int(NR*T/100-0.5)]*1.1)/100+0.5)*100 ; if( (all[FNR]-Q) > Q/2) {print Q/1000} else print int(all[FNR]/100)/10 }'
 }
-if [ "$KIT" == "NBD" ] # native barcoding kit = full sequences most of the time, sometimes double sequences
-then
-	GS=$(tileormax 90 $BC.init.fastq)
-elif [ "$KIT" == "RBK" ] # rapide barcoding kit = small to full sequences, need to keep lots of small reads
-then
-	GS=$(tileormax 97 $BC.init.fastq)
-	MINL=300
-	if [ $(echo "$GS > 3.5" | bc) -eq 1 ]
-	then
-		MINO=150 # reduced minimum overlap for longer barcodes works better, likely because coverage is reduced, so less chance to have overlap
+		# determine the expected length by using the 97% percentile length plus 10% 
+		# if difference between maxlength and Q97 is greater than Q97/2, use Q97 else use max
+		# with rapide barcoding kit, sequences can be small to nearly complete, so need to keep lots of small reads
+		GS=$(parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | tileormax 97 $BC.init.fastq)
+		MINL=300
+		if [ $(echo "$GS > 3.5" | bc) -eq 1 ]
+		then
+			MINO=150 # reduced minimum overlap for longer barcodes works better, likely because coverage is reduced, so less chance to have overlap
+		else
+			MINO=200
+		fi		
+		if (( $(echo "$GS < 1" | bc -l) ))
+		then
+			>&2 parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit stat -T | column -t -s $'\t'
+			error stop "Raw reads of $BC are too small to allow assembly; expected length computed at ${GS}K nt. Abort"
+		fi
+		echo "Expected length fixed at ${GS}K nt"
 	else
-		MINO=200
+		GS=$(echo "scale=1 ; $SIZE / 1000" | bc)
 	fi
+	parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit seq -m $(printf '%.0f\n' $(echo $GS*100 | bc)) -M $(printf '%.0f\n' $(echo $GS*2000 | bc)) > $BC.init.fastq
 fi
-
-if (( $(echo "$GS < 1" | bc -l) ))
-then
-	>&2 decomp $RAWFQ | seqkit stat -T | column -t -s $'\t'
-	error stop "Raw reads of $BC are too small to allow assembly; expected length computed at ${GS}K nt. Abort"
-fi
-echo "Expected length fixed at ${GS}K nt"
 
 # determine if enough reads to achieve coverage on expected length
-read RTOTL RMEANL <<< $(cat $BC.init.fastq | seqkit stat -T | sed '1d' | cut -f 5,7)
-if [ $RTOTL -lt $(awk -v S=$GS -v M=$RMEANL -v C=${!MODE} 'BEGIN{F=int(S*1000/M+0.99); print int(S*1000*F*C)}') ]
+read RTOTL RMEANL <<< $(seqkit stat -T $BC.init.fastq | sed '1d' | cut -f 5,7)
+if [ $RTOTL -lt $(echo "${!MODE} * $GS * 1000 * 0.9 / 1" | bc) ]
 then
-	echo "Warning: Not enough raw reads to allow for ${COV}X coverage for $BC, switch to low coverage mode"
+	echo "Warning: Not enough raw reads to allow for ${COV}X coverage for $BC, switch to low coverage mode (${LOWC}X)."
 	MODE=LOWC
-	if [ $RTOTL -lt $(awk -v S=$GS -v M=$RMEANL -v C=${!MODE} 'BEGIN{F=int(S*1000/M+0.99); print int(S*1000*F*C)}') ]
+	if [ $RTOTL -lt $(echo "${!MODE} * $GS * 1000 * 0.9 / 1" | bc) ]
 	then
 		error stop "Not enough raw reads to allow for ${LOWC}X low coverage for $BC. Aborting"
 	fi
@@ -269,20 +308,29 @@ fi
 # Clustering or assembly
 if [ "$KIT" == "NBD" ]
 then
-	rattle cluster -i $BC.init.fastq -t $NCPUS -s 0.9 2> log.rattle # need to test higher similarity to check for overclustering
+	rattle cluster -i $BC.init.fastq -t $NCPUS -s $THRESHOLD 2> log.rattle # need to test lower/higher similarity to check for under/overclustering
 	rattle cluster_summary -i $BC.init.fastq -c clusters.out > cluster_summary.tsv 2>> log.rattle
 	mkdir clusters
 	rattle extract_clusters -i $BC.init.fastq -c clusters.out -o clusters --fastq -m ${!MODE} 2>> log.rattle
-	rattle correct -i $BC.init.fastq -c clusters.out -t $NCPUS 2>> log.rattle
-	rattle polish -i consensi.fq -t $NCPUS 2>> log.rattle
-	seqkit fq2fa transcriptome.fq | awk -v C=${!MODE} '{if($1~"^>"){flag=0;for(i=2;i<=NF;i++){if($i~"^total_read"){split($i,a,"=");if(a[2]>=C){print $0;flag=1;break}}}} else {if(flag==1){print $0}}}' > $BC.contigs.N${!MODE}.fasta
-	rm -r *.fq clusters clusters.out
+	if [ $(ls clusters/ | wc -l) -eq 0 ]
+	then
+		if [ "$MODE" == "LOWC" ]
+		then
+			echo -e "no contig found with ${!MODE}X low coverage for $BC.\nConsider reducing rattle score threshold with option -t (currently fixed at $THRESHOLD ).\nCurrent reads number per cluster:"
+			awk -F'_' '{print $NF}' cluster_summary.tsv | sort | uniq -c | cat <(echo "reads cluster_nr") - | column -t
+			error stop "Aborting"
+		fi
+	else
+		rattle correct -i $BC.init.fastq -c clusters.out -t $NCPUS 2>> log.rattle
+		rattle polish -i consensi.fq -t $NCPUS 2>> log.rattle
+		seqkit fq2fa transcriptome.fq | awk -v C=${!MODE} '{if($1~"^>"){flag=0;for(i=2;i<=NF;i++){if($i~"^total_read"){split($i,a,"=");if(a[2]>=C){print $0;flag=1;break}}}} else {if(flag==1){print $0}}}' > $BC.contigs.N${!MODE}.fasta
+		rm -r *.fq clusters clusters.out
+	fi
 	if [ ${!MODE} -eq $COV ] && [ ! -s $BC.contigs.N${!MODE}.fasta ]
 	then
 		echo "Warning: no contig found with ${!MODE}X coverage for $BC, switch to low coverage mode"
-		rm $BC.contigs.N${!MODE}.fasta
+		rm -f $BC.contigs.N${!MODE}.fasta
 		MODE=LOWC
-		mkdir clusters
 		rattle extract_clusters -i $BC.init.fastq -c clusters.out -o clusters --fastq -m ${!MODE} 2>> log.rattle
 		rattle correct -i $BC.init.fastq -c clusters.out -t $NCPUS 2>> log.rattle
 		rattle polish -i consensi.fq -t $NCPUS 2>> log.rattle
@@ -290,7 +338,9 @@ then
 		rm -r *.fq clusters clusters.out
 		if [ ! -s $BC.contigs.N${!MODE}.fasta ]
 		then
-			error stop "no contig found with ${!MODE}X low coverage for $BC. Aborting"
+			echo -e "no contig found with ${!MODE}X low coverage for $BC.\nConsider reducing rattle score threshold with option -t (currently fixed at $THRESHOLD ).\nCurrent reads number per cluster:"
+			awk -F'_' '{print $NF}' cluster_summary.tsv | sort | uniq -c | cat <(echo "reads cluster_nr") - | column -t
+			error stop "Aborting"
 		fi
 	fi
 else
@@ -372,11 +422,21 @@ else
 	fi
 fi
 
+# Medaka polishing
+parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | gzip > ${BC}.raw.fastq.gz
+medaka_consensus -t $NCPUS -i ${BC}.raw.fastq.gz -d $BC.contigs.N${!MODE}.fasta -m $MODEL -q > log.medaka 2>&1
+mv medaka/consensus.fastq $BC.N${!MODE}.fastq
+rm ${BC}.raw.fastq.gz
+if [ -z "$DEBUG" ]
+then
+	rm -r medaka/
+fi
+
 # extract rRNA sequences
 if [ ! -z "$RRNA" ]
 then
 	# predict rRNA
-	barrnap --reject 0.1 --kingdom $KING --threads $NCPUS --outseq ${BC}.contigs.N${!MODE}.rrna.fasta $BC.contigs.N${!MODE}.fasta > log.barrnap 2>&1
+	seqkit fq2fa $BC.N${!MODE}.fastq | barrnap --reject 0.1 --kingdom $KING --threads $NCPUS --outseq ${BC}.N${!MODE}.rrna.fasta > log.barrnap 2>&1
 fi
 
 # Some contigs are reverse complement of longer contigs (barcode01)
