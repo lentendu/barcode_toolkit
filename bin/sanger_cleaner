@@ -61,7 +61,7 @@ Options
 		path to directory containing raw ab1 files
 	
 	-s SIM
-		output pairwise sequences similarities above the provided SIM similarity threshold (float number between 0.5 and 1.0, advised 0.97); helpfull to detect cross contaminations and/or group sequences into OTUs
+		output pairwise sequences similarities above the provided SIM similarity threshold (float number between 0.5 and 1.0, advised 0.97) and corresponding clusters, if any; helpfull to detect cross contaminations and/or group sequences into OTUs
 	
 	-t TRIM
 		minimum average quality for sliding window trimming, value between 0 (all quality allowed) and 60 (only perfect bases allowed) ; default: 30
@@ -605,11 +605,16 @@ do
 	fi
 done
 
-# output pairwise sequence similarity
+# output pairwise sequence similarity (and clusters)
 if [ ! -z "$SIM" ]
 then
-	cat $EXEC/sanger_cleaner.$OUTPUT/*.${DIR##*/}.fasta | seqkit seq -g | sed 's/;orga.*//' > allseq.fasta
-	vsearch --threads $NCPUS --usearch_global allseq.fasta --db allseq.fasta -self --id $SIM --iddef 2 --userout - -userfields query+target+id2 --maxaccepts 0 --query_cov 0.8 --maxhits 48 | awk 'BEGIN{S=OFS="\t"}{if($2>$1){print $2,$1,$3} else {print $0}}' | sort -u > $EXEC/sanger_cleaner.$OUTPUT/${DIR##*/}.pairwise_similarity.txt
+	cat $EXEC/sanger_cleaner.$OUTPUT/*.${DIR##*/}.fasta | seqkit seq -g | sed 's/;orga.*//;s/sample=//' > allseq.fasta
+	vsearch --threads $NCPUS --usearch_global allseq.fasta --db allseq.fasta -self --id $SIM --iddef 2 --userout - -userfields query+target+id2 --maxaccepts 0 --query_cov 0.8 --maxhits 48 | awk 'BEGIN{FS=OFS="\t"}{if($2>$1){print $2,$1,$3} else {print $0}}' | sort -u > allseq.sim
+	if [ -s allseq.sim ]
+	then 
+		mv allseq.sim $EXEC/sanger_cleaner.$OUTPUT/${DIR##*/}.pairwise_similarity.txt
+		vsearch --cluster_smallmem allseq.fasta --usersort --id $SIM --iddef 2 --uc - --quiet | awk 'BEGIN{FS=OFS="\t"; a=1}{if(NR==1){p=$2; s=$9; c=1} else {if($2==p){s=s"#"$9; c+=1} else {if(c>1){print "cluster_"a,s;a+=1}; p=$2; s=$9; c=1}}}END{if(c>1){print "cluster_"a,s}}' | tr "#" "\t" > $EXEC/sanger_cleaner.$OUTPUT/${DIR##*/}.clusters_${SIM#*.}_similarity.txt
+	fi
 fi
 
 finish $DEBUG
