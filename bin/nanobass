@@ -225,7 +225,7 @@ then
 	parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | seqkit grep --quiet -f <(grep "fwd [lh] rvs_rc" primer_pattern_lookup | cut -d " " -f 1) | cutadapt -j $NCPUS -g "$FWD;o=$((${#FWD}*4/5));e=$FDIFFS...${RVSRC};o=$((${#RVS}*4/5));e=$RDIFFS" -m $LFR -M $MFR - > tmp.fwd.cut 2> log.cut # --max-aer 0.05
 	if [ -s tmp.fwd.cut ]
 	then
-		if [ $(echo "$(seqkit stat -T tmp.fwd.cut | sed '1d' | cut -f 5) > $COV * 10" | bc -l) ]
+		if [ "$(seqkit stat -T tmp.fwd.cut | sed '1d' | cut -f 4)" -gt $(($COV * 10)) ]
 		then
 			# if already 10 times more sequences than needed just use cutadapt approach and skip hmm
 			# cutadapt on reverse sequences and reverse complement
