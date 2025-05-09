@@ -425,7 +425,8 @@ fi
 # Medaka polishing
 parallel -j $NCPUS decomp {1}/{2} ::: $RAWDIR ::: ${RAWFQ[@]} | gzip > ${BC}.raw.fastq.gz
 medaka_consensus -t $NCPUS -i ${BC}.raw.fastq.gz -d $BC.contigs.N${!MODE}.fasta -m $MODEL -q > log.medaka 2>&1
-mv medaka/consensus.fastq $BC.N${!MODE}.fastq
+seqkit bam --idx-count medaka/calls_to_draft.bam 2>&1 | sed '1d' | sort -k 1,1 | join - <(seqkit fx2tab medaka/consensus.fastq | sort -k 1,1) | awk '{print "@"$1";size="$2"\n"$3"\n+\n"$4}' > $BC.N${!MODE}.fastq
+# mv medaka/consensus.fastq $BC.N${!MODE}.fastq
 rm ${BC}.raw.fastq.gz
 if [ -z "$DEBUG" ]
 then
