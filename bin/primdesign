@@ -225,13 +225,13 @@ then
 fi
 
 # speed up by keeping only one sequence of outgroup per taxonomic path
-if [ $SPEED -eq "path" ]
+if [ $SPEED == "path" ]
 then
 	sort -k 2,2 db.outg.taxo | awk '{if(NR==1){p=$2;print $0} else {if($2!=p){p=$2;print $0}}}' > tmp.db.outg.taxo && mv tmp.db.outg.taxo db.outg.taxo
-elif [ $SPEED -eq "species" ]
+elif [ $SPEED == "species" ]
 then
 	sed 's/_sp\.[^;]*/_sp./g;s/_cf\._/_/;s/_nr\._/_/;s/_pr\._/_/;s/\(;species:[A-Za-z]*_[a-z\.]*\).*$/\1/' db.outg.taxo | sort -k 2,2 | awk '{if(NR==1){p=$2;print $0} else {if($2!=p){p=$2;print $0}}}' > tmp.db.outg.taxo && mv tmp.db.outg.taxo db.outg.taxo
-elif [ $SPEED -eq "genus" ]
+elif [ $SPEED == "genus" ]
 then
 	sed 's/;species:.*$//' db.outg.taxo | sort -k 2,2 | awk '{if(NR==1){p=$2;print $0} else {if($2!=p){p=$2;print $0}}}' > tmp.db.outg.taxo && mv tmp.db.outg.taxo db.outg.taxo
 else
