@@ -39,7 +39,7 @@ DESCRIPTION
 	-i INDICES
 		minimum threshold of the barcodes indices (coverage, specificty and precision), default: 0.7-0.1-0.9
 	
-	-l MINLENGTH,MAXLENGTH
+	-l MINLENGTH-MAXLENGTH
 		length range of the amplified barcode, default: 300-450
 	
 	-o OUTGROUP,OUTGROUP,...
@@ -48,7 +48,8 @@ DESCRIPTION
 	-p MINLENGTH,MAXLENGTH
 		length range of the primer sequences, default: 18-22
 	
-	-s	speed up computation by keeping only one sequence per taxonomic path in the outgroup sequences
+	-s RANK
+		speed up computation by keeping only one sequence per taxonomic "path" in the outgroup sequences. Can also be done at "species" or "genus" level. Default: "path"
 	
 	-t TM_RANGE
 		melting temprature range in °C, default: 50-65
@@ -117,7 +118,6 @@ MINL=300
 MAXL=450
 MINP=18
 MAXP=22
-SPEED=0
 TMDIFF=10
 MINTM=50
 MAXTM=65
@@ -125,7 +125,7 @@ TARGLEV=family
 OUTGLEV=class
 
 # get options
-while getopts ":a:bc:d:e:f:g:hi:j:l:o:p:st:u:vw:" opt
+while getopts ":a:bc:d:e:f:g:hi:j:l:o:p:s:t:u:vw:" opt
 do
 	case $opt in
 		h)	show_help | fmt -s -w $(tput cols)
@@ -147,7 +147,7 @@ do
 		l)	read MINL MAXL < <(echo ${OPTARG/-/ });;
 		p)	read MINP MAXP < <(echo ${OPTARG/-/ });;
 		o)	OUTGROUP=($(echo ${OPTARG//,/ }));;
-		s)	SPEED=1;;
+		s)	SPEED=${OPTARG};;
 		t)	[[ ${OPTARG} =~ ^[0-9][0-9]*-[0-9][0-9]*$ ]] || error_help " -t option ${OPTARG} have to be in the format INT-INT"
 			read MINTM MAXTM <<< ${OPTARG/-/ };;
 		u)	TARGLEV=${OPTARG};;
@@ -225,9 +225,17 @@ then
 fi
 
 # speed up by keeping only one sequence of outgroup per taxonomic path
-if [ $SPEED -eq 1 ]
+if [ $SPEED -eq "path" ]
 then
 	sort -k 2,2 db.outg.taxo | awk '{if(NR==1){p=$2;print $0} else {if($2!=p){p=$2;print $0}}}' > tmp.db.outg.taxo && mv tmp.db.outg.taxo db.outg.taxo
+elif [ $SPEED -eq "species" ]
+then
+	sed 's/_sp\.[^;]*/_sp./g;s/_cf\._/_/;s/_nr\._/_/;s/_pr\._/_/;s/\(;species:[A-Za-z]*_[a-z\.]*\).*$/\1/' db.outg.taxo | sort -k 2,2 | awk '{if(NR==1){p=$2;print $0} else {if($2!=p){p=$2;print $0}}}' > tmp.db.outg.taxo && mv tmp.db.outg.taxo db.outg.taxo
+elif [ $SPEED -eq "genus" ]
+then
+	sed 's/;species:.*$//' db.outg.taxo | sort -k 2,2 | awk '{if(NR==1){p=$2;print $0} else {if($2!=p){p=$2;print $0}}}' > tmp.db.outg.taxo && mv tmp.db.outg.taxo db.outg.taxo
+else
+	error_stop "Arguments to option -s can only be path, species or genus"
 fi
 
 # fasta and UTAX formats
