@@ -234,10 +234,14 @@ fi
 # use aligned database to find primer position and detect candidate reads
 if [ -n "$DBALIGN" ] && [ -z "$QUICK" ]
 then
-	cutadapt --quiet -j $NCPUS -g "$FWD;e=$MISMF;o=${#FWD}...$RVSRC;e=$MISMR;o=${#RVS}" --no-indels --trimmed-only -o tmp.cut_db.fasta tmp.db.fasta > cutadapt_all.log
+	cutadapt -j $NCPUS -g "$FWD;e=$MISMF;o=${#FWD}...$RVSRC;e=$MISMR;o=${#RVS}" --no-indels --trimmed-only -o tmp.cut_db.fasta tmp.db.fasta > cutadapt_all.log
 	if [ -s tmp.cut_db.fasta ]
 	then
-		seqkit grep --quiet -f <(grep -o "^>[^ ]*" tmp.cut_db.fasta | sed 's/>//') $DBDIR/$DBALIGN | seqkit sample --quiet -s100 -n 100 | goalign replace -s "." -n "-" | mafft --quiet --thread $NCPUS --auto --addfragments primers.fasta --mapout - > /dev/null
+		seqkit grep --quiet -f <(grep -o "^>[^ ]*" tmp.cut_db.fasta | sed 's/>//') $DBDIR/$DBALIGN | seqkit sample --quiet -s100 -n 100 | goalign replace -s "." -n "-" | mafft --quiet --thread $NCPUS --auto --addfragments primers.fasta --mapout - > /dev/null || true && err=1
+		if [ ! -z "$err" ]; then
+			echo "mafft addfragments failed, switch to add algorithm to map primers positions"
+			seqkit grep --quiet -f <(grep -o "^>[^ ]*" tmp.cut_db.fasta | sed 's/>//') $DBDIR/$DBALIGN | seqkit sample --quiet -s100 -n 100 | goalign replace -s "." -n "-" | mafft --quiet --thread $NCPUS --auto --add primers.fasta --mapout - > /dev/null
+		fi
 		# select sequences spanning the amplified fragment including primer regions
 		seqkit grep --quiet -f <(cut -f 1 tmp.db.taxo) $DBDIR/$DBALIGN > tmp.db.align
 		goalign -t $NCPUS stats gaps --from-start -i tmp.db.align | awk '{print $1,$NF}' | paste - <(goalign -t $NCPUS stats gaps --from-end -i tmp.db.align | cut -f 2) | awk -v L=$(seqkit head -w 0 -n 1 tmp.db.align | awk 'NR==2{print length($1)}') -v P=$(grep -v "^>\|^#" primers.fasta.map | awk '{a[NR]=$3}END{print a[1]"#"a[FNR]}') 'BEGIN{split(P,a,"#")} $2<=a[1] && (L-$3)>=a[2]{print $1}' > tmp.db.accnos
