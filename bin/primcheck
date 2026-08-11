@@ -217,7 +217,7 @@ else
 # reduce database to clades of interest
 	if [ -n "$REDUCE" ]
 	then
-		grep "$(echo ${CLADE[@]} | sed 's/^/:/;s/ /;\\|:/;s/$/;/')" $DBDIR/$DBTAXO | grep ";${FAM}:.*;${GEN}:.*;${SPE}:" > tmp.db.taxo
+		grep "$(echo ${CLADE[@]} | sed 's/^/:/;s/ /;\\|:/g;s/$/;/')" $DBDIR/$DBTAXO | grep ";${FAM}:.*;${GEN}:.*;${SPE}:" > tmp.db.taxo
 		echo -e "# The database ${DBF%.*} is reduced to the $(sed -n '$=' tmp.db.taxo) sequences of the clade(s) ${CLADE[@]}.\n"
 	else
 		# if not reduced, use the lowest common taxonomic rank of all database sequence
