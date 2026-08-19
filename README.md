@@ -53,6 +53,8 @@ echo "PATH=\$PATH:$PWD/barcode_toolkit/bin" >> ~/.bashrc
 
 **primdesign** is a tool to automatically design primer pairs for target clade PCR amplification.
 
+**primup** is a tool to automatically improve primer pair sequences to increase target clade coverage by adding ambiguous bases.
+
 **probe_sra_marker** is a tool to extract reads matching a probe from short reads archive marker gene run files.
 
 **sanger_cleaner** is a tool for basecalling and quality trimming of Sanger sequences using tracy, sickle, cutadapt, mafft and goalign.

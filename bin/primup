@@ -1,0 +1,246 @@
+#!/bin/bash
+
+# Usage info
+show_help() {
+cat << EOF
+
+NAME
+	primup - primer improvements through in-silico PCR
+	
+SYNOPSIS
+	Usage: ${0##*/} [ -bht ] [ -j cores ] [ -m MAXIMUM_ITERATIONS ] [ -n OUTGROUP_COVERAGE ] [ -o OUTGROUP_INFLATION ] [ -p POSITION_THRESHOLD ] primcheck_temporary_directory
+	
+	This script use the temporary output directory of a primcheck command to propose primer improvements in order to increase coverage of the target group while maintaning outgroup co-amplification below a user define threshold.
+
+DESCRIPTION
+	-h display this help and exit
+	
+	-b debug on, avoid deleting temporay directory
+	
+	-j cores
+		number of CPU cores to use in parallel; default from primcheck environment
+	
+	-i COVERAGE_INFLATION
+		minimum percentage increase of target amplification without mismatch allowed compared to the previous in-silico amplification round; set to 0 to disable this option; default: 10
+	
+	-m MAXIMUM_ITERATIONS
+		maximum number of primer improvement iterations; default: 10
+	
+	-n OUTGROUP_INFLATION
+		maximum percentage increase of outgroup co-amplification without mismatch allowed compared to the previous in-silico amplification round; set to 0 to disable this option; default: 10
+	
+	-o OUTGROUP_COVERAGE
+		percentage of increase of outgroup coverage compare to the initial in-silico amplification with unmodified primers; default: 20
+		
+	-p POSITION_THRESHOLD
+		percentage of target in-silico amplified reads that need to be covered at each primer position as compute in the previous in-silico amplification round; nucleotide at each primer position are added in their decreasing abundance order until the threshold is reached; default: 70
+	
+	-t
+		print trace of all intermediate steps
+	
+AUTHOR
+	Guillaume Lentendu
+
+COPYRIGHT
+	Copyright (C) 2026 Guillaume Lentendu
+
+EOF
+}
+
+error_help(){
+	echo "#Error: $1"
+	show_help | fmt -s -w $(tput cols)
+	rm -f $TEMPENV
+	exit 1
+} >&2
+
+error_stop(){
+	echo -e "#Error: $1"
+	finish 1
+} >&2
+
+logo2prim () {
+	sort -k 1,1n -k 3,3nr | awk -v x=$1 -v n=$2 '{if(NR==1){p=$1; s=$3; print p,$2} else {if($1==p){if(s<n*x/100){s+=$3; print p,$2}} else {p=$1; s=$3; print p,$2}}}' | sort -k 1,1n -k 2,2 | awk '{if(NR==1){p=$1; printf "%s %s", $1, $2} else {if($1==p){printf "%s",$2} else {p=$1; printf "\n%s %s",$1,$2}}}END{printf "\n"}' | sort -k 2,2 | join -a 1 -1 2 -2 2 - <(sort -k 2,2 $BTK/utils/IUPAC.txt) | sort -k 2,2n | awk '{if(NF==3){printf "%s", $3} else printf "%s", $1}'
+}
+
+output(){
+	if [ -n "$TRACE" ] ; then
+		echo "## Intermediate steps ##"
+		for j in $(seq 0 $i) ; do
+			echo ${OUT[$j]} | tr " " "\t"
+		done | cat <(echo -e "improvement iteration\tforward primer\treverse primer\tin-silico target\tno mismatch target\ttarget in DB\tin-silico outgroup\tno mismatch outgroup\toutgroup in DB") - | $BTK/utils/coltab
+		echo -e "####\n"
+	fi
+	echo -e "$1"
+	finish 0
+}
+
+finish(){
+	if [ -n "$UPDEB" ] ; then
+		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
+		ln -s $BTK/utils/load_env $PWD
+		>&2 echo -e "\n# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell\ncd primup.$UPCK && source ./load_env"
+		rm $TEMPENV
+		cd ..
+	else
+		cd ..
+		rm -r primup.$UPCK $TEMPENV	
+	fi
+	exit $1
+}
+export -f finish
+
+# store initial environment
+TEMPENV=$(mktemp)
+(set -o posix; set > $TEMPENV)
+START_TIME=`date +%s`
+INIT_DIR=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+
+# Option's default value
+TPOS=70
+TARGI=10
+OUTC=20
+OUTI=10
+MAXI=10
+
+# get options
+while getopts ":bhi:j:m:n:o:p:t" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			exit 0;;
+		b)	export UPDEB=1;;
+		i)	TARGI=${OPTARG};;
+		j)	NCPUS=${OPTARG};;
+		m)	MAXI=${OPTARG};;
+		n)	OUTI=${OPTARG};;
+		o)	OUTC=${OPTARG};;
+		p)	TPOS=${OPTARG};;
+		t)	export TRACE=1;;
+		\?)	error_help "# Invalid option: -${OPTARG}"
+			;;
+		:)	error_help "# Option -${OPTARG} requires an argument."
+			;;
+	esac
+done
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
+# primcheck directory control and sourcing of environment
+if [ -z "$1" ]
+then 
+	error_help "the primcheck temporary directory is missing."
+else
+	PRIM=$(readlink -f $1); shift
+	if [ ! -d "$PRIM" ] ; then
+		error_help "the provided primcheck temporary directory do not exist."
+	else
+		cd $PRIM && source ./load_env && cd ..
+	fi
+fi
+
+# generate instance hash and working directory
+TEMP=$(mktemp)
+join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > $TEMP
+UPCK=`cksum $TEMP | awk '{print $1}'`
+if [ -d primup.$UPCK ] ; then
+	error_stop "the temporary directory primup.$UPCK already exist. Change at least one parameter compare to this prvious run instance to allow execution"
+fi
+mkdir primup.$UPCK && cd primup.$UPCK
+mv $TEMP tmp_env
+
+# symlink needed primcheck directory content
+for file in $(ls $PRIM/* | grep -v "env"); do
+	ln -s $file ./
+done
+
+# General variables
+TARGSEQ=$(grep sequences tmp.targ.stat | cut -f 3)
+OUTGSEQ=$(grep sequences tmp.outg.stat | cut -f 3)
+
+# enter the loop (limit to 10 rounds)
+i=0
+PFWD=$FWD
+PRVS=$RVS
+declare -a OUT
+while [ $i -lt $MAXI ] ; do
+	# previous amplification stat files
+	if [ $i -eq 0 ] ; then
+		ln -s tmp.in_silico_targ prev.in_silico_targ
+		ln -s tmp.in_silico_targ.fwd.logo prev.in_silico_targ.fwd.logo
+		ln -s tmp.in_silico_targ.rvs.logo prev.in_silico_targ.rvs.logo
+		# generate new primers
+		PSEQ=$(($(sed -n '$=' prev.in_silico_targ) / 2))
+		POSEQ=$(($(seqkit stat -T tmp.cut_db.fasta | cut -f 4 | sed '1d') - PSEQ))
+		PFWD=FWD
+		PRVS=RVS
+		NFWD=$(cat prev.in_silico_targ.fwd.logo | logo2prim $TPOS $PSEQ)
+		NRVS=$(cat prev.in_silico_targ.rvs.logo | logo2prim $TPOS $PSEQ)
+		PZT=$(cut -d " " -f 2,4 tmp.in_silico_targ | paste - - | sort | uniq -c | awk '{if($2==0 && $4==0){print $1}}')
+		PZO=$(cut -f 1,2,6,8 cutadapt.info | grep -v "\-1$" | sed 's/ [^\t]*\t/\t/' | sort --parallel=$NCPUS -k 1,1 -k 4,4 | join - <(cut -f 1 $DBCUT.outg.taxo) | cut -d " " -f 2,4 | paste - - | sort | uniq -c | awk '{if($2==0 && $4==0){print $1}}')
+		OUT[0]="initial $FWD $RVS $PSEQ ${PZT:-0} $TARGSEQ ${POSEQ:-0} ${PZO:-0} ${OUTGSEQ:-0}"
+	else
+		mv new.in_silico_targ prev.in_silico_targ
+		mv new.in_silico_targ.fwd.logo prev.in_silico_targ.fwd.logo
+		mv new.in_silico_targ.rvs.logo prev.in_silico_targ.rvs.logo
+		PSEQ=$MSEQ
+		POSEQ=$MOSEQ
+		PFWD=$NFWD
+		PRVS=$NRVS
+		NFWD=$MFWD
+		NRVS=$MRVS
+		PZT=${ZT:-0}
+		PZO=${ZO:-0}
+	fi
+	NRVSRC=$(echo -e ">rvs\n$NRVS" | seqkit seq --quiet -t dna -r -p | tail -1)
+	
+	# in-silico amplification
+	NDBCUT=m$FWDNAME.m$RVSNAME.tmp.db
+	cutadapt -j $NCPUS -g "$NFWD;e=$MISMF;o=${#FWD}...$NRVSRC;e=$MISMR;o=${#RVS}" --no-indels --trimmed-only --info-file cutadapt.info -o $NDBCUT.fasta tmp.db.fasta 2> cutadapt.err > cutadapt.log 
+	sed -n '/^>/{s/>//;s/[\t ].*//;p}' $NDBCUT.fasta | sort --parallel=$NCPUS | join -t $'\t' - <(sort --parallel=$NCPUS -k 1,1 -t $'\t' tmp.db.taxo) > $NDBCUT.taxo
+	grep $TARG $NDBCUT.taxo > $NDBCUT.targ.taxo
+	grep -v $TARG $NDBCUT.taxo > $NDBCUT.outg.taxo
+	
+	# control if new primers fulfill the requirements (match x % of the target sequences at each position)
+	# target
+	cut -f 1,2,6,8 cutadapt.info | grep -v "\-1$" | sed 's/ [^\t]*\t/\t/' | sort --parallel=$NCPUS -k 1,1 -k 4,4 | join - <(cut -f 1 $NDBCUT.targ.taxo) | tee new.in_silico_targ | sed -n '/;1$/p' | cut -f 3 -d " " | sed 's/\(.\)/\1 /g' | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{OFS="\t";l=0;split("A#C#G#T",n,"#")}{for(i=2;i<=NF;i++){p[i,$i]+=$1};if(NF>l){l=NF}}END{for(i=2;i<=l;i++){for(j in n){if( (i, n[j]) in p){print i-1,n[j],p[i,n[j]]} else print i-1,n[j],"0"}}}' > new.in_silico_targ.fwd.logo
+	sed -n '/;2$/p' new.in_silico_targ | awk '{print ">"$1"\n"$3}' | seqkit seq --quiet -t dna -r -p | grep -v "^>" | sed 's/\(.\)/\1 /g' | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{OFS="\t";l=0;split("A#C#G#T",n,"#")}{for(i=2;i<=NF;i++){p[i,$i]+=$1};if(NF>l){l=NF}}END{for(i=2;i<=l;i++){for(j in n){if( (i, n[j]) in p){print i-1,n[j],p[i,n[j]]} else print i-1,n[j],"0"}}}' > new.in_silico_targ.rvs.logo
+	# outgroup
+	cut -f 1,2,6,8 cutadapt.info | grep -v "\-1$" | sed 's/ [^\t]*\t/\t/' | sort --parallel=$NCPUS -k 1,1 -k 4,4 | join - <(cut -f 1 $NDBCUT.outg.taxo) > new.in_silico_outg
+	MSEQ=$(sed -n '$=' $NDBCUT.targ.taxo)
+	MFWD=$(cat new.in_silico_targ.fwd.logo | logo2prim $TPOS $MSEQ)
+	MRVS=$(cat new.in_silico_targ.rvs.logo | logo2prim $TPOS $MSEQ)
+	MOSEQ=$(sed -n '$=' $NDBCUT.outg.taxo)
+	ZT=$(cut -d " " -f 2,4 new.in_silico_targ | paste - - | sort | uniq -c | awk '{if($2==0 && $4==0){print $1}}')
+	ZO=$(cut -d " " -f 2,4 new.in_silico_outg | paste - - | sort | uniq -c | awk '{if($2==0 && $4==0){print $1}}')
+	
+	# Report 
+	i=$((i+1))
+	OUT[$i]="$i $NFWD $NRVS $MSEQ ${ZT:-0} $TARGSEQ ${MOSEQ:-0} ${ZO:-0} ${OUTGSEQ:-0}"
+	
+	# control outgroup growth do not increase more than OUTI %, or not more than OUTC total %
+	if [ -s $NDBCUT.outg.taxo ] ; then
+		if [ $POSEQ -gt 0 ] && [ $OUTI != 0 ]; then
+			if [ ${ZO:-0} -gt $((${PZO:-0} * OUTI / 100)) ] ; then
+				output "Improvement procedure stop due to too high increase in outgroup sequences in-silico co-amplification without mismatch.\nYou can try to modify the corresponding -n option\n\nLast best primer pair:\nforward: $PFWD\nreverse: $PRVS"				
+			fi
+		fi
+		if [ ${OUTGSEQ:-0} -gt 0 ] ; then
+			if [ $MOSEQ -gt $((OUTGSEQ * OUTC / 100)) ] ; then
+				output "Improvement procedure stop due to too high total proportion of outgroup sequences in-silico co-amplification.\nYou can try to modify the corresponding -o option\n\nLast best primer pair:\nforward: $PFWD\nreverse: $PRVS"
+			fi
+		fi
+	fi
+	
+	# stop if coverage of target was not improved enough
+	if [ $((${ZT:-0} - ${PZT:-0})) -le $((${PZT:-0} * TARGI / 100)) ] ; then
+		output "Improvement procedure stop as target coverage without mismatch did not increase enough with increased wobbling.\nYou can try to modify the corresponding -i option\n\nLast best primer pair:\nforward: $PFWD\nreverse: $PRVS"
+	fi	
+	
+	# stop if converged
+	if [ $MFWD == $NFWD ] && [ $MRVS == $NRVS ] ; then
+		output "Improvement procedure matched the requested threshold\n\nFinal primer pair:\nforward: $NFWD\nreverse: $NRVS"
+	fi
+done
+
+output "improvement did not reach the requested threshold after $MAXI rounds of improvement\ntry with a different position threshold (-p option)"
