@@ -74,7 +74,7 @@ EOF
 error_help(){
 	echo "#Error: $1"
 	show_help | fmt -s -w $(tput cols)
-	rm -f /tmp/primdesign.$STIME.set
+	rm -f $TEMPENV
 	exit 1
 } >&2
 
@@ -129,7 +129,6 @@ while getopts ":a:bc:d:e:f:g:hi:j:l:o:p:s:t:u:vw:" opt
 do
 	case $opt in
 		h)	show_help | fmt -s -w $(tput cols)
-			rm -f /tmp/primcheck.$STIME.set
 			exit 0;;
 		a)	APOLOPT="${OPTARG}";;
 		b)	DEBUG=1;;
