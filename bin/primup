@@ -174,7 +174,7 @@ while [ $i -lt $MAXI ] ; do
 		ln -s tmp.in_silico_targ.rvs.logo prev.in_silico_targ.rvs.logo
 		# generate new primers
 		PSEQ=$(($(sed -n '$=' prev.in_silico_targ) / 2))
-		POSEQ=$(($(seqkit stat -T tmp.cut_db.fasta | cut -f 4 | sed '1d') - PSEQ))
+		POSEQ=$(($(seqkit stat -T $DBCUT.fasta | cut -f 4 | sed '1d') - PSEQ))
 		PFWD=FWD
 		PRVS=RVS
 		NFWD=$(cat prev.in_silico_targ.fwd.logo | logo2prim $TPOS $PSEQ)
