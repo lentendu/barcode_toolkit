@@ -65,6 +65,8 @@ logo2prim () {
 
 output(){
 	if [ -n "$TRACE" ] ; then
+		echo "## primup run with following options ##"
+		echo -e "primup -j $NCPUS -i $TARGI -m $MAXI -n $OUTI -o $OUTC -p $TPOS\n"
 		echo "## Intermediate steps ##"
 		for j in $(seq 0 $i) ; do
 			echo ${OUT[$j]} | tr " " "\t"
@@ -98,6 +100,7 @@ INIT_DIR=$PWD
 BTK=$(dirname $(readlink -f $(dirname "$0")))
 
 # Option's default value
+NCPUS=1
 TPOS=70
 TARGI=10
 OUTC=20
