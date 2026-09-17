@@ -175,8 +175,8 @@ while [ $i -lt $MAXI ] ; do
 		# generate new primers
 		PSEQ=$(($(sed -n '$=' prev.in_silico_targ) / 2))
 		POSEQ=$(($(seqkit stat -T $DBCUT.fasta | cut -f 4 | sed '1d') - PSEQ))
-		PFWD=FWD
-		PRVS=RVS
+		PFWD=$FWD
+		PRVS=$RVS
 		NFWD=$(cat prev.in_silico_targ.fwd.logo | logo2prim $TPOS $PSEQ)
 		NRVS=$(cat prev.in_silico_targ.rvs.logo | logo2prim $TPOS $PSEQ)
 		PZT=$(cut -d " " -f 2,4 tmp.in_silico_targ | paste - - | sort | uniq -c | awk '{if($2==0 && $4==0){print $1}}')
@@ -225,19 +225,19 @@ while [ $i -lt $MAXI ] ; do
 	if [ -s $NDBCUT.outg.taxo ] ; then
 		if [ $POSEQ -gt 0 ] && [ $OUTI != 0 ]; then
 			if [ ${ZO:-0} -gt $((${PZO:-0} * OUTI / 100)) ] ; then
-				output "Improvement procedure stop due to too high increase in outgroup sequences in-silico co-amplification without mismatch.\nYou can try to modify the corresponding -n option\n\nLast best primer pair:\nforward: $PFWD\nreverse: $PRVS"				
+				output "Improvement procedure stop due to too high increase in outgroup sequences in-silico co-amplification without mismatch.\nYou can try to modify the corresponding -n option\n\nLast best primer pair:\nforward: ${PFWD}\nreverse: ${PRVS}"				
 			fi
 		fi
 		if [ ${OUTGSEQ:-0} -gt 0 ] ; then
 			if [ $MOSEQ -gt $((OUTGSEQ * OUTC / 100)) ] ; then
-				output "Improvement procedure stop due to too high total proportion of outgroup sequences in-silico co-amplification.\nYou can try to modify the corresponding -o option\n\nLast best primer pair:\nforward: $PFWD\nreverse: $PRVS"
+				output "Improvement procedure stop due to too high total proportion of outgroup sequences in-silico co-amplification.\nYou can try to modify the corresponding -o option\n\nLast best primer pair:\nforward: ${PFWD}\nreverse: ${PRVS}"
 			fi
 		fi
 	fi
 	
 	# stop if coverage of target was not improved enough
 	if [ $((${ZT:-0} - ${PZT:-0})) -le $((${PZT:-0} * TARGI / 100)) ] ; then
-		output "Improvement procedure stop as target coverage without mismatch did not increase enough with increased wobbling.\nYou can try to modify the corresponding -i option\n\nLast best primer pair:\nforward: $PFWD\nreverse: $PRVS"
+		output "Improvement procedure stop as target coverage without mismatch did not increase enough with increased wobbling.\nYou can try to modify the corresponding -i option\n\nLast best primer pair:\nforward: ${PFWD}\nreverse: ${PRVS}"
 	fi	
 	
 	# stop if converged
