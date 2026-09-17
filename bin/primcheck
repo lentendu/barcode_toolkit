@@ -203,7 +203,9 @@ echo -e ">$FWDNAME\n$FWD\n>$RVSNAME\n$RVSRC" > primers.fasta
 DBCUT=$FWDNAME.$RVSNAME.tmp.db
 MISMF=$(awk -v E=$ERR -v F=${#FWD} 'BEGIN{printf "%.2f",E/F+0.005}')
 MISMR=$(awk -v E=$ERR -v R=${#RVS} 'BEGIN{printf "%.2f",E/R+0.005}')
-
+declare -a OCLADE
+OCLADE=($(echo ${CLADE[@]} | sed "s/ *$TARG//"))
+		
 # database check
 if [ -n "$QUICK" ]
 then
@@ -319,10 +321,10 @@ then
 			OUTGRANKS=($(echo ${OUTGRANKS[@]} | tr " " "\n"  | sort | join -2 2 - <(nl $BTK/utils/ncbi_ranks | sort -k 2,2) | sort -k 2,2n | cut -d " " -f 1))
 		fi
 		# for all outgroup sequences
-		printf '%s\n' "${CLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " db_all_stat > tmp.outg.stat
+		printf '%s\n' "${OCLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " db_all_stat > tmp.outg.stat
 		
 		# report
-		if [ -n "${CLADE[@]}" ] ; then CLADETEXT=" constrained to the following clade(s): ${CLADE[@]}" ; fi
+		if [ -n "${OCLADE[@]}" ] ; then CLADETEXT=" constrained to the following clade(s): ${OCLADE[@]}" ; fi
 		echo "# Database statistics of outgroups$CLADETEXT"
 		awk -v R="outgroup" -f $BTK/utils/spread.awk tmp.outg.stat | $BTK/utils/coltab
 		
@@ -421,11 +423,11 @@ then
 			if [ -s $DBCUT.outg.taxo ]
 			then
 				# for all outgroup sequences
-				printf '%s\n' "${CLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " in_silico_stat > tmp.in_silico_outg.stat
+				printf '%s\n' "${OCLADE[@]/%/ outg ${OUTGRANKS[@]}}" | parallel -j $NCPUS -k --colsep=" " in_silico_stat > tmp.in_silico_outg.stat
 				sed 's/\t/_/' tmp.outg.stat | nl -n ln -s $'\t' | sort -k 2,2 -t $'\t' | join -t $'\t' -1 2 - <(sed 's/\t/_/' tmp.in_silico_outg.stat | sort -k 1,1 -t $'\t') | sort -k 2,2n -t $'\t' | sed 's/_/\t/' | awk 'BEGIN{FS=OFS="\t"}{if($2~"length"){print $1,$2,$5} else {printf "%s\t%s\t%.1f%s\n",$1,$2,$5/$4*100,"%\t("$5"/"$4")"}}' > tmp.in_silico_outg.perc
 					
 				# report
-				echo "# Database in-silico amplified sequence percentages of outgroups$CLADETEXT"
+				echo -e "\n# Database in-silico amplified sequence percentages of outgroups$CLADETEXT"
 				awk -v R="outgroup" -f $BTK/utils/spread.awk tmp.in_silico_outg.perc | $BTK/utils/coltab
 				
 				if [ -z "$AVOID" ]
@@ -454,7 +456,7 @@ then
 				awk -v E=$ERR '{C[$2,$3]=$1}END{for(i=0;i<=E;i++){if(i==0){printf "Reverse_mismatch %s @",i} else {printf "@ %s @",i};for(j=0;j<=E;j++){if( (j, i) in C){printf " %s",C[j,i]} else printf " 0"};printf "\n"};printf "\n"}' tmp.in_silico_outg.err | cat <(echo -e "#_Error_profile in @ in-silico amplified outgroup sequences\nForward_mismatch : @ $(eval echo {0..$ERR})\n") - | column -t -e | sed 's/@/ /g;s/\([^ ]*\)\(  *\):/ \2\1/;s/_/ /g;/^#/s/  */ /g'
 		
 			else
-				echo "# No outgroup sequences were amplified in-silico"
+				echo -e "\n# No outgroup sequences were amplified in-silico"
 			fi
 		fi
 		
