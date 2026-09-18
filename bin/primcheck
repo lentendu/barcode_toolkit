@@ -469,7 +469,7 @@ then
 			if [ $(grep -v "_sp\.\|_aff\.\|_cf\.\|_nr\." $DBCUT.targ.taxo | sed "s/.*;$GEN:\([^;]*\);.*/\1/" | sort --parallel=$NCPUS | uniq -c | awk 'BEGIN{s=0}$1>1{s+=$1*($1-1)/2}END{print s}') -gt 10 ]
 			then
 				CBG=1
-				echo "# Intra-clade similarity of in-silico amplified target sequences."
+				echo -e "\n\n# Intra-clade similarity of in-silico amplified target sequences."
 				for i in ${TARGCLADE[@]} 
 				do
 					grep -v "_sp\.\|_aff\.\|_cf\.\|_nr\." $DBCUT.targ.taxo | sed -n "/;$TARGRES:$i;/s/\t.*;$GEN:\([^;]*\).*;$SPE:\([^;]*\).*$/\t\1\t\2/p" | sort --parallel=$NCPUS -k 1,1 -t $'\t' > $i.$DBCUT.taxo
