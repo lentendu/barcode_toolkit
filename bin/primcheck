@@ -203,9 +203,7 @@ echo -e ">$FWDNAME\n$FWD\n>$RVSNAME\n$RVSRC" > primers.fasta
 DBCUT=$FWDNAME.$RVSNAME.tmp.db
 MISMF=$(awk -v E=$ERR -v F=${#FWD} 'BEGIN{printf "%.2f",E/F+0.005}')
 MISMR=$(awk -v E=$ERR -v R=${#RVS} 'BEGIN{printf "%.2f",E/R+0.005}')
-declare -a OCLADE
-OCLADE=($(echo ${CLADE[@]} | sed "s/ *$TARG//"))
-		
+
 # database check
 if [ -n "$QUICK" ]
 then
@@ -230,6 +228,8 @@ else
 		echo -e "# The database ${DBF%.*} is reduced to the $(sed -n '$=' tmp.db.taxo) sequences with at least family to species taxonomic information.\n"
 	fi
 	seqkit seq -i $DBDIR/$DBFASTA | seqkit grep --quiet -w 0 -f <(cut -f 1 tmp.db.taxo) > tmp.db.fasta
+	declare -a OCLADE
+	OCLADE=($(echo ${CLADE[@]} | sed "s/ *$TARG//"))
 fi
 
 # use aligned database to find primer position and detect candidate reads
