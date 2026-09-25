@@ -169,7 +169,7 @@ clust () {
 export -f clust
 
 distribute () {
-	cat "${@:--}" | parallel --recstart "#" --remove-rec-sep --pipe -N1 clust
+	cat "${@:--}" | parallel -j1 --recstart "#" --remove-rec-sep --pipe -N1 clust
 }
 export -f distribute
 
@@ -180,8 +180,15 @@ echo -e "# There is $(sed -n '$=' ${DBFASTA%.*}.sp.m.uniq) sequences remanining 
 if [ $SPECIES == "yes" ] ; then
 	seqkit grep --quiet -w 0 -f <( cat <(awk '$4==1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spnr.fasta
 else
-	seqkit grep --quiet -w 0 -f <( cat <(awk '$2!~";species:"{print $1}' $DBDIR/$DBTAXO) <(awk '$4>1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spnr.fasta
+	seqkit grep --quiet -w 0 -f <( cat <(awk '$2!~";species:"{print $1}' $DBDIR/$DBTAXO) <(awk '$4>1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.NR$TRESH.fasta
 fi
-nl -n ln -w 1 $DBDIR/$DBTAXO | sort -k 2,2 -t $'\t' | join -1 2 -t $'\t' - <(sed -n '/>/ s/^>//p' $DBDIR/${DBFASTA%.*}.spnr.fasta | sort) | sort -k 2,2n -t $'\t' | cut -f 1,3 > $DBDIR/${DBTAXO%.*}.spnr.${DBTAXO##*.}
+
+nl -n ln -w 1 $DBDIR/$DBTAXO | sort -k 2,2 -t $'\t' | join -1 2 -t $'\t' - <(sed -n '/>/ s/^>//p' $DBDIR/${DBFASTA%.*}.spnr.fasta | sort) | sort -k 2,2n -t $'\t' | cut -f 1,3 > $DBDIR/${DBTAXO%.*}.NR$TRESH.${DBTAXO##*.}
+
+TAB="$(printf '\t')"
+cat << EOF > ${DBTMP%.*}.NR$TRESH.txt
+fasta${TAB}${DBFASTA%.*}.NR$TRESH.fasta
+taxonomy${TAB}${DBTAXO%.*}.NR$TRESH.${DBTAXO##*.}
+EOF
 
 finish $DEBUG

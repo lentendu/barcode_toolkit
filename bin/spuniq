@@ -27,6 +27,12 @@ DESCRIPTION
 	
 	-s	species only: keep only sequences assigned at least to species level
 
+OUTPUTS
+	spuniq create 3 files, following the naming convention database.spuniq.* :
+	 - a database description file: database.spuniq.txt
+	 - a fasta file: database.spuniq.fasta
+	 - a taxonomy file: database.spuniq.TAX, TAX being the the suffix of the original database taxonomy file
+	
 AUTHOR
 	Guillaume Lentendu
 
@@ -156,7 +162,7 @@ derep () {
 export -f derep
 
 distribute () {
-	cat "${@:--}" | parallel --recstart "#" --remove-rec-sep --pipe -N1 derep
+	cat "${@:--}" | parallel -j1 --recstart "#" --remove-rec-sep --pipe -N1 derep
 }
 export -f distribute
 
@@ -170,5 +176,11 @@ else
 	seqkit grep --quiet -w 0 -f <( cat <(awk '$2!~";species:"{print $1}' $DBDIR/$DBTAXO) <(awk '$4>1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spuniq.fasta
 fi
 nl -n ln -w 1 $DBDIR/$DBTAXO | sort -k 2,2 -t $'\t' | join -1 2 -t $'\t' - <(sed -n '/>/ s/^>//p' $DBDIR/${DBFASTA%.*}.spuniq.fasta | sort) | sort -k 2,2n -t $'\t' | cut -f 1,3 > $DBDIR/${DBTAXO%.*}.spuniq.${DBTAXO##*.}
+
+TAB="$(printf '\t')"
+cat << EOF > ${DBTMP%.*}.spuniq.txt
+fasta${TAB}$DBDIR/${DBFASTA%.*}.spuniq.fasta
+taxonomy${TAB}${DBTAXO%.*}.spuniq.${DBTAXO##*.}
+EOF
 
 finish $DEBUG
