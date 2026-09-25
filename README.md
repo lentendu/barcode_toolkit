@@ -61,6 +61,8 @@ echo "PATH=\$PATH:$PWD/barcode_toolkit/bin" >> ~/.bashrc
 
 **spuniq** reduce database size by keeping a single exemplar of identical sequences for each specie
 
+**spnr** create non-redundant sequence database by clustering species sequences at a chosen threshold
+
 Any of these tools can be call with the -h option to see full options and usage.
 
 
