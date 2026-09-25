@@ -57,7 +57,7 @@ finish(){
 		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
 		ln -s $BTK/utils/load_env $PWD
 		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
-		>&2 echo "cd primcheck.$HASH && source ./load_env"
+		>&2 echo "cd spuniq.$HASH && source ./load_env"
 		rm $TEMPENV
 		cd ..
 	fi
@@ -74,8 +74,8 @@ BTK=$(dirname $(readlink -f $(dirname "$0")))
 # Option's default value
 DEBUG=0
 NCPUS=1
-export HOMOP=no
-export IDDEF=1
+HOMOP=no
+IDDEF=1
 SPECIES=no
 
 # get options
@@ -86,8 +86,8 @@ do
 			exit 0;;
 		b)	DEBUG=1;;
 		j)	NCPUS=${OPTARG};;
-		o)	export HOMOP=yes;;
-		p)	export IDDEF=2;;
+		o)	HOMOP=yes;;
+		p)	IDDEF=2;;
 		s)	SPECIES=yes;;
 		\?)	error_help "# Invalid option: -${OPTARG}"
 			;;
@@ -124,6 +124,8 @@ HASH=`cksum $TEMP | awk '{print $1}'`
 mkdir spuniq.$HASH && cd spuniq.$HASH
 mv $TEMP tmp_env
 
+export HOMOP IDDEF
+
 echo -e "# The database ${DBF%.*} contains $(sed -n '$=' $DBDIR/$DBTAXO) sequences.\n"
 
 # sequences with species information
@@ -158,7 +160,7 @@ distribute () {
 }
 export -f distribute
 
-cat ${DBFASTA%.*}.sp.m.fasth | parallel -j $NCPUS --block 4M --recstart "#" --pipe distribute > ${DBFASTA%.*}.sp.m.uniq
+cat ${DBFASTA%.*}.sp.m.fasth | parallel -j $NCPUS --block 10M --recstart "#" --pipe distribute > ${DBFASTA%.*}.sp.m.uniq
 echo -e "# There is $(sed -n '$=' ${DBFASTA%.*}.sp.m.uniq) sequences remanining after dereplication for species with more than one sequence.\n"
 
 # output only species dereplicated and species with a single sequence, or with all non-species assigned sequences

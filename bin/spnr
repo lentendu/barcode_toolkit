@@ -68,7 +68,7 @@ finish(){
 		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
 		ln -s $BTK/utils/load_env $PWD
 		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
-		>&2 echo "cd primcheck.$HASH && source ./load_env"
+		>&2 echo "cd spnr.$HASH && source ./load_env"
 		rm $TEMPENV
 		cd ..
 	fi
@@ -85,10 +85,10 @@ BTK=$(dirname $(readlink -f $(dirname "$0")))
 # Option's default value
 DEBUG=0
 NCPUS=1
-export HOMOP=no
-export IDDEF=1
+HOMOP=no
+IDDEF=1
 SPECIES=no
-export TRESH=0.98
+TRESH=0.98
 
 # get options
 while getopts ":bhj:opst:" opt
@@ -98,10 +98,10 @@ do
 			exit 0;;
 		b)	DEBUG=1;;
 		j)	NCPUS=${OPTARG};;
-		o)	export HOMOP=yes;;
-		p)	export IDDEF=2;;
+		o)	HOMOP=yes;;
+		p)	IDDEF=2;;
 		s)	SPECIES=yes;;
-		t)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 50")" )) && (( "$(bc <<<"${OPTARG} < 100")" )); then export TRESH=$(bc -l <<< "scale=3; ${OPTARG} / 100") ; else error_help "value provided to option -i should be a number between 51 and 100, not ${OPTARG}" ; fi ;;
+		t)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 50")" )) && (( "$(bc <<<"${OPTARG} < 100")" )); then TRESH=$(bc -l <<< "scale=3; ${OPTARG} / 100") ; else error_help "value provided to option -i should be a number between 51 and 100, not ${OPTARG}" ; fi ;;
 		\?)	error_help "# Invalid option: -${OPTARG}"
 			;;
 		:)	error_help "# Option -${OPTARG} requires an argument."
@@ -137,6 +137,8 @@ HASH=`cksum $TEMP | awk '{print $1}'`
 mkdir spnr.$HASH && cd spnr.$HASH
 mv $TEMP tmp_env
 
+export HOMOP IDDEF TRESH
+
 echo -e "# The database ${DBF%.*} contains $(sed -n '$=' $DBDIR/$DBTAXO) sequences.\n"
 
 # sequences with species information
@@ -159,10 +161,9 @@ echo -e "# There is $(awk '$1>1{c+=1}END{print c}' ${DBTAXO%.*}.species) species
 # clustering in parallel
 clust () {
 	if [ $HOMOP == "yes" ] ; then
-		sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}" | vsearch --quiet --cluster_size - --id 1.0 --iddef $IDDEF --sizeout --centroids - | seqkit fx2tab -l | sed 's/;size=/\t/;s/\t\t*/\t/g' | sort -t $'\t' -k 2,2nr -k 4,4nr | awk '{print ">"$1"\n"$3}' | vsearch --quiet --cluster_smallmem - --id $TRESH --iddef $IDDEF --usersort --uc tmpuc
+		sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}" | vsearch --quiet --cluster_size - --id 1.0 --iddef $IDDEF --sizeout --centroids - | seqkit fx2tab -l | sed 's/;size=/\t/;s/\t\t*/\t/g' | sort -t $'\t' -k 2,2nr -k 4,4nr | awk '{print ">"$1"\n"$3}' | vsearch --quiet --cluster_smallmem - --id $TRESH --iddef $IDDEF --usersort --uc - | awk -F'\t' '$1=="C"{print $9}'
 	else
-		if [ $IDDEF == "yes" ] ; then
-		vsearch --quiet --cluster_size "${1:--}" --id 1.0 --iddef $IDDEF --sizeout --centroids - | seqkit fx2tab -l | sed 's/;size=/\t/;s/\t\t*/\t/g' | sort -t $'\t' -k 2,2nr -k 4,4nr | awk '{print ">"$1"\n"$3}' | vsearch --quiet --cluster_smallmem - --id $TRESH --iddef $IDDEF --usersort --uc tmpuc
+		vsearch --quiet --cluster_size "${1:--}" --id 1.0 --iddef $IDDEF --sizeout --centroids - | seqkit fx2tab -l | sed 's/;size=/\t/;s/\t\t*/\t/g' | sort -t $'\t' -k 2,2nr -k 4,4nr | awk '{print ">"$1"\n"$3}' | vsearch --quiet --cluster_smallmem - --id $TRESH --iddef $IDDEF --usersort --uc - | awk -F'\t' '$1=="C"{print $9}'
 	fi
 }
 export -f clust
@@ -172,7 +173,7 @@ distribute () {
 }
 export -f distribute
 
-cat ${DBFASTA%.*}.sp.m.fasth | parallel -j $NCPUS --block 4M --recstart "#" --pipe distribute > ${DBFASTA%.*}.sp.m.uniq
+cat ${DBFASTA%.*}.sp.m.fasth | parallel -j $NCPUS --block 10M --recstart "#" --pipe distribute > ${DBFASTA%.*}.sp.m.uniq
 echo -e "# There is $(sed -n '$=' ${DBFASTA%.*}.sp.m.uniq) sequences remanining after dereplication for species with more than one sequence.\n"
 
 # output only species dereplicated and species with a single sequence, or with all non-species assigned sequences
