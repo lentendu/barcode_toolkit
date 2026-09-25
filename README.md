@@ -59,6 +59,8 @@ echo "PATH=\$PATH:$PWD/barcode_toolkit/bin" >> ~/.bashrc
 
 **sanger_cleaner** is a tool for basecalling and quality trimming of Sanger sequences using tracy, sickle, cutadapt, mafft and goalign.
 
+**spuniq** reduce database size by keeping a single exemplar of identical sequences for each specie
+
 Any of these tools can be call with the -h option to see full options and usage.
 
 

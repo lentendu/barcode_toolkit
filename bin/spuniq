@@ -1,0 +1,179 @@
+#!/bin/bash
+set -euo pipefail
+
+# Usage info
+show_help() {
+cat << EOF
+
+NAME
+	spuniq - keep a single unique sequence per species
+	
+SYNOPSIS
+	Usage: ${0##*/} [ -hps ] [ -j cores ] database
+	
+	This script keep only a single unique sequence per species in the provided database. The "database" field is a path to the database description file. The description file is a tab-separated files with "fasta" and "taxonomy" in the first column, and the filenames of the corresponding fasta file and taxonomy file of the databases in the second column, which need to be in the same directory. The taxonomy format need to match the format: sequence identifier, a tabulation and a taxonomy path of the format rank:taxonomy;rank:taxonomy[;rank:taxonomy]*
+
+DESCRIPTION
+	-h display this help and exit
+	
+	-b debug on, avoid deleting temporay directory
+	
+	-j cores
+		number of CPU cores to use in parallel; default from primcheck environment
+		
+	-o	homopolymer collapse: collapse homopolymer longer than 2 nt to 2 nt and then keep a single unique variant with length nearer to the average length from all identical sequences
+	
+	-p	prefix unique: ignore end-gaps when looking for unique/identical sequences, the longest sequence is kept
+	
+	-s	species only: keep only sequences assigned at least to species level
+
+AUTHOR
+	Guillaume Lentendu
+
+COPYRIGHT
+	Copyright (C) 2026 Guillaume Lentendu
+
+EOF
+}
+
+error_help(){
+	echo "#Error: $1"
+	show_help | fmt -s -w $(tput cols)
+	rm -f $TEMPENV
+	exit 1
+} >&2
+
+error_stop(){
+	echo -e "#Error: $1"
+	finish 1
+} >&2
+
+finish(){
+	if [ "$1" -eq 0 ]
+	then
+		cd ..
+		rm -r spuniq.$HASH $TEMPENV
+	else
+		join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > final_env
+		ln -s $BTK/utils/load_env $PWD
+		>&2 echo "# Debugging information: use the following command to dive into the temporary directory and load environemntal variables to the current shell"
+		>&2 echo "cd primcheck.$HASH && source ./load_env"
+		rm $TEMPENV
+		cd ..
+	fi
+}
+
+
+# store initial environment
+TEMPENV=$(mktemp)
+(set -o posix; set > $TEMPENV)
+START_TIME=`date +%s`
+INIT_DIR=$PWD
+BTK=$(dirname $(readlink -f $(dirname "$0")))
+
+# Option's default value
+DEBUG=0
+NCPUS=1
+export HOMOP=no
+export PREFIX=no
+SPECIES=no
+
+# get options
+while getopts ":bhj:ops" opt
+do
+	case $opt in
+		h)	show_help | fmt -s -w $(tput cols)
+			exit 0;;
+		b)	DEBUG=1;;
+		j)	NCPUS=${OPTARG};;
+		o)	export HOMOP=yes;;
+		p)	export PREFIX=yes;;
+		s)	SPECIES=yes;;
+		\?)	error_help "# Invalid option: -${OPTARG}"
+			;;
+		:)	error_help "# Option -${OPTARG} requires an argument."
+			;;
+	esac
+done
+shift "$((OPTIND-1))" # Shift off the options and optional --.
+
+# database
+if [ -z "$1" ]
+then 
+	error_help "the database is missing."
+else
+	DBTMP=$(readlink -f "${1}")
+	if [ ! -f $DBTMP ] ; then
+		error_help "the database description file cannot be found"
+	fi
+	DBF="${DBTMP##*/}"
+	DBDIR="${DBTMP%/*}"
+	DBFASTA=$(awk '$1=="fasta"{print $2}' $DBDIR/$DBF)
+	DBTAXO=$(awk '$1=="taxonomy"{print $2}' $DBDIR/$DBF)
+	if [ ! -f $DBFASTA ] ; then
+		error_help "the database fasta file cannot be found"
+	elif [ ! -f $DBTAXO ] ; then
+		error_help "the database taxonomy file cannot be found"
+	fi
+fi
+
+# generate instance hash and working directory
+TEMP=$(mktemp)
+join -v 1 <(set -o posix; set | tr "=" "\t" | sort -k 1,1 ) <(cat $TEMPENV | tr "=" "\t" | sort -k 1,1 ) | grep -v "^[a-z]\|BASH_REMATCH\|TEMP" | sed "s/'//g" > $TEMP
+HASH=`cksum $TEMP | awk '{print $1}'`
+mkdir spuniq.$HASH && cd spuniq.$HASH
+mv $TEMP tmp_env
+
+echo -e "# The database ${DBF%.*} contains $(sed -n '$=' $DBDIR/$DBTAXO) sequences.\n"
+
+# sequences with species information
+grep ";species:" $DBDIR/$DBTAXO > ${DBTAXO%.*}.sp.taxo
+seqkit grep --quiet -w 0 -f <(cut -f 1 ${DBTAXO%.*}.sp.taxo) $DBDIR/$DBFASTA > ${DBFASTA%.*}.sp.fasta
+echo -e "# There is $(sed -n '$=' ${DBTAXO%.*}.sp.taxo) sequences with a species assingment.\n"
+
+# separate species with a single sequence
+sed 's/.*;\(species:[^:;]*\).*/\1/' ${DBTAXO%.*}.sp.taxo | sort | uniq -c | sed 's/^[ \t]*//;s/  */\t/' > ${DBTAXO%.*}.species
+echo -e "# There is $(awk '$1==1{c+=1}END{print c}' ${DBTAXO%.*}.species) species with a single sequences.\n"
+
+# distribution of sequences number per species
+# awk '$1>1{print $1}' ${DBTAXO%.*}.species | sort | uniq -c | sort -k 2,2n
+
+# format to fasth the sequences of species with more than one sequence
+sed 's/\(.*;\)\(species:[^:;]*\)\(.*\)/\2\t\1\2\3/' ${DBTAXO%.*}.sp.taxo | sort -k 1,1 -t $'\t' | join -2 2 -t $'\t' - ${DBTAXO%.*}.species > ${DBTAXO%.*}.sp.count.taxo
+seqkit fx2tab -j $NCPUS ${DBFASTA%.*}.sp.fasta | sort -k 1,1 -t $'\t' | join -1 2 -t $'\t' <(awk '$4>1{print}' ${DBTAXO%.*}.sp.count.taxo | cut -f 1-2 | sort -k 2,2) - | sort -k 2,2 -t $'\t' | awk -F'\t' '{if($2==prev){print ">"$1"\n"$3} else {print "#>"$1"\n"$3;prev=$2}}' > ${DBFASTA%.*}.sp.m.fasth
+echo -e "# There is $(awk '$1>1{c+=1}END{print c}' ${DBTAXO%.*}.species) species with more than one sequence, representing a total of $(grep -c "^#>\|^>" ${DBFASTA%.*}.sp.m.fasth) sequences.\n"
+
+# dereplication in parallel
+derep () {
+	if [ $HOMOP == "yes" ] ; then
+		if [ $PREFIX == "yes" ] ; then
+			sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}"| vsearch --quiet --cluster_size - --id 1.0 --iddef 2 --uc - | awk -F'\t' '$1=="C"{print $9}'
+		else
+			sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}" | vsearch --quiet --cluster_size - --id 1.0 --iddef 1 --uc - | awk -F'\t' '$1=="C"{print $9}'
+		fi
+	else
+		if [ $PREFIX == "yes" ] ; then
+			vsearch --quiet --cluster_size $1 --id 1.0 --iddef 2 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
+			vsearch --quiet --cluster_size $1 --id 1.0 --iddef 1 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
+		fi
+	fi
+}
+export -f derep
+
+distribute () {
+	cat "${@:--}" | parallel --recstart "#" --remove-rec-sep --pipe -N1 derep
+}
+export -f distribute
+
+cat ${DBFASTA%.*}.sp.m.fasth | parallel -j $NCPUS --block 4M --recstart "#" --pipe distribute > ${DBFASTA%.*}.sp.m.uniq
+echo -e "# There is $(sed -n '$=' ${DBFASTA%.*}.sp.m.uniq) sequences remanining after dereplication for species with more than one sequence.\n"
+
+# output only species dereplicated and species with a single sequence, or with all non-species assigned sequences
+if [ $SPECIES == "yes" ] ; then
+	seqkit grep --quiet -w 0 -f <( cat <(awk '$4==1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spuniq.fasta
+else
+	seqkit grep --quiet -w 0 -f <( cat <(awk '$2!~";species:"{print $1}' $DBDIR/$DBTAXO) <(awk '$4>1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spuniq.fasta
+fi
+nl -n ln -w 1 $DBDIR/$DBTAXO | sort -k 2,2 -t $'\t' | join -1 2 -t $'\t' - <(sed -n '/>/ s/^>//p' $DBDIR/${DBFASTA%.*}.spuniq.fasta | sort) | sort -k 2,2n -t $'\t' | cut -f 1,3 > $DBDIR/${DBTAXO%.*}.spuniq.${DBTAXO##*.}
+
+finish $DEBUG
