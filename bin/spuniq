@@ -154,6 +154,7 @@ derep () {
 	else
 		if [ $PREFIX == "yes" ] ; then
 			vsearch --quiet --cluster_size $1 --id 1.0 --iddef 2 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
+		else
 			vsearch --quiet --cluster_size $1 --id 1.0 --iddef 1 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
 		fi
 	fi
