@@ -75,7 +75,7 @@ BTK=$(dirname $(readlink -f $(dirname "$0")))
 DEBUG=0
 NCPUS=1
 export HOMOP=no
-export PREFIX=no
+export IDDEF=1
 SPECIES=no
 
 # get options
@@ -87,7 +87,7 @@ do
 		b)	DEBUG=1;;
 		j)	NCPUS=${OPTARG};;
 		o)	export HOMOP=yes;;
-		p)	export PREFIX=yes;;
+		p)	export IDDEF=2;;
 		s)	SPECIES=yes;;
 		\?)	error_help "# Invalid option: -${OPTARG}"
 			;;
@@ -146,17 +146,9 @@ echo -e "# There is $(awk '$1>1{c+=1}END{print c}' ${DBTAXO%.*}.species) species
 # dereplication in parallel
 derep () {
 	if [ $HOMOP == "yes" ] ; then
-		if [ $PREFIX == "yes" ] ; then
-			sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}"| vsearch --quiet --cluster_size - --id 1.0 --iddef 2 --uc - | awk -F'\t' '$1=="C"{print $9}'
-		else
-			sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}" | vsearch --quiet --cluster_size - --id 1.0 --iddef 1 --uc - | awk -F'\t' '$1=="C"{print $9}'
-		fi
+		sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}"| vsearch --quiet --cluster_size - --id 1.0 --iddef $IDDEF --uc - | awk -F'\t' '$1=="C"{print $9}'
 	else
-		if [ $PREFIX == "yes" ] ; then
-			vsearch --quiet --cluster_size $1 --id 1.0 --iddef 2 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
-		else
-			vsearch --quiet --cluster_size $1 --id 1.0 --iddef 1 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
-		fi
+		vsearch --quiet --cluster_size "${1:--}" --id 1.0 --iddef $IDDEF --uc - | awk -F'\t' '$1=="C"{print $9}'
 	fi
 }
 export -f derep

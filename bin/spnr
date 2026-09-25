@@ -11,7 +11,7 @@ NAME
 SYNOPSIS
 	Usage: ${0##*/} [ -hps ] [ -j cores ] database.txt
 	
-	This script cluster sequences of each species in the provided database and keep only each cluster representative sequence. Clustering use VSEARCH --cluster_smallmem algorithm with a fix threshold. Additionnaly, end-gaps and homopolymer length can be disregarded when clustering sequences.
+	This script cluster sequences of each species in the provided database and keep only each cluster representative sequence. Clustering use VSEARCH --cluster_smallmem algorithm with a fix threshold. In each cluster, the representative sequence is first the most abundant after dereplication, then, if ties highest abundances, the longest. Additionnaly, end-gaps and homopolymer length can be disregarded when clustering sequences.
 		
 	The database.txt is a path to the database description file. The description file is a tab-separated files with "fasta" and "taxonomy" in the first column, and the filenames of the corresponding fasta file and taxonomy file of the databases in the second column, which need to be in the same directory. The taxonomy file is TAB separated with the sequence identifier in the first field, and a taxonomy path of the format rank:taxonomy;rank:taxonomy[;rank:taxonomy]* in the second field.
 
@@ -86,7 +86,7 @@ BTK=$(dirname $(readlink -f $(dirname "$0")))
 DEBUG=0
 NCPUS=1
 export HOMOP=no
-export PREFIX=no
+export IDDEF=1
 SPECIES=no
 export TRESH=0.98
 
@@ -99,7 +99,7 @@ do
 		b)	DEBUG=1;;
 		j)	NCPUS=${OPTARG};;
 		o)	export HOMOP=yes;;
-		p)	export PREFIX=yes;;
+		p)	export IDDEF=2;;
 		s)	SPECIES=yes;;
 		t)	if [[ ${OPTARG} =~ ^[0-9]+\.?[0-9]*$ ]] && (( "$(bc <<<"${OPTARG} > 50")" )) && (( "$(bc <<<"${OPTARG} < 100")" )); then export TRESH=$(bc -l <<< "scale=3; ${OPTARG} / 100") ; else error_help "value provided to option -i should be a number between 51 and 100, not ${OPTARG}" ; fi ;;
 		\?)	error_help "# Invalid option: -${OPTARG}"
@@ -159,17 +159,10 @@ echo -e "# There is $(awk '$1>1{c+=1}END{print c}' ${DBTAXO%.*}.species) species
 # clustering in parallel
 clust () {
 	if [ $HOMOP == "yes" ] ; then
-		if [ $PREFIX == "yes" ] ; then
-			sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}"| vsearch --quiet --cluster_size - --id $TRESH --iddef 2 --uc - | awk -F'\t' '$1=="C"{print $9}'
-		else
-			sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}" | vsearch --quiet --cluster_size - --id $TRESH --iddef 1 --uc - | awk -F'\t' '$1=="C"{print $9}'
-		fi
+		sed "/^>/ s/[; ]size=.*//; /^>/! s/\([ATCGN]\)\1\+/\1\1/g" "${1:--}" | vsearch --quiet --cluster_size - --id 1.0 --iddef $IDDEF --sizeout --centroids - | seqkit fx2tab -l | sed 's/;size=/\t/;s/\t\t*/\t/g' | sort -t $'\t' -k 2,2nr -k 4,4nr | awk '{print ">"$1"\n"$3}' | vsearch --quiet --cluster_smallmem - --id $TRESH --iddef $IDDEF --usersort --uc tmpuc
 	else
-		if [ $PREFIX == "yes" ] ; then
-			vsearch --quiet --cluster_size $1 --id $TRESH --iddef 2 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
-		else
-			vsearch --quiet --cluster_size $1 --id $TRESH --iddef 1 --uc "${1:--}" | awk -F'\t' '$1=="C"{print $9}'
-		fi
+		if [ $IDDEF == "yes" ] ; then
+		vsearch --quiet --cluster_size "${1:--}" --id 1.0 --iddef $IDDEF --sizeout --centroids - | seqkit fx2tab -l | sed 's/;size=/\t/;s/\t\t*/\t/g' | sort -t $'\t' -k 2,2nr -k 4,4nr | awk '{print ">"$1"\n"$3}' | vsearch --quiet --cluster_smallmem - --id $TRESH --iddef $IDDEF --usersort --uc tmpuc
 	fi
 }
 export -f clust
