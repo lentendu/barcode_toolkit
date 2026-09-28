@@ -179,7 +179,7 @@ nl -n ln -w 1 $DBDIR/$DBTAXO | sort -k 2,2 -t $'\t' | join -1 2 -t $'\t' - <(sed
 
 TAB="$(printf '\t')"
 cat << EOF > ${DBTMP%.*}.spuniq.txt
-fasta${TAB}$DBDIR/${DBFASTA%.*}.spuniq.fasta
+fasta${TAB}${DBFASTA%.*}.spuniq.fasta
 taxonomy${TAB}${DBTAXO%.*}.spuniq.${DBTAXO##*.}
 EOF
 
