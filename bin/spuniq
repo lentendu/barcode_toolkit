@@ -173,7 +173,7 @@ echo -e "# There is $(sed -n '$=' ${DBFASTA%.*}.sp.m.uniq) sequences remanining 
 if [ $SPECIES == "yes" ] ; then
 	seqkit grep --quiet -w 0 -f <( cat <(awk '$4==1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spuniq.fasta
 else
-	seqkit grep --quiet -w 0 -f <( cat <(awk '$2!~";species:"{print $1}' $DBDIR/$DBTAXO) <(awk '$4=1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spuniq.fasta
+	seqkit grep --quiet -w 0 -f <( cat <(awk '$2!~";species:"{print $1}' $DBDIR/$DBTAXO) <(awk '$4==1{print $2}' ${DBTAXO%.*}.sp.count.taxo) ${DBFASTA%.*}.sp.m.uniq) $DBDIR/$DBFASTA > $DBDIR/${DBFASTA%.*}.spuniq.fasta
 fi
 nl -n ln -w 1 $DBDIR/$DBTAXO | sort -k 2,2 -t $'\t' | join -1 2 -t $'\t' - <(sed -n '/>/ s/^>//p' $DBDIR/${DBFASTA%.*}.spuniq.fasta | sort) | sort -k 2,2n -t $'\t' | cut -f 1,3 > $DBDIR/${DBTAXO%.*}.spuniq.${DBTAXO##*.}
 
